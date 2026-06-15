@@ -1,0 +1,149 @@
+# remote_codex_agent - Codex CLI QQ 调度器配置
+
+[plugin]
+# 配置文件版本
+config_version = "0.2.1"
+
+# 是否启用插件。触发权限仍由 permission.allowed_users / allow_all_users 控制。
+enabled = true
+
+[server]
+# 远程 Ubuntu Agent 服务地址，例如 "https://agent.example.com" 或 "http://10.0.0.2:8080"
+base_url = ""
+
+# 鉴权 token。插件会以 Authorization: Bearer <token> 形式发送。
+api_token = ""
+
+# 是否要求配置 api_token。生产环境建议保持 true。
+require_api_token = true
+
+# 创建任务接口路径
+create_path = "/v1/tasks"
+
+# 查询任务状态接口路径模板，必须包含 {task_id}
+status_path_template = "/v1/tasks/{task_id}"
+
+# 取消任务接口路径模板，必须包含 {task_id}
+cancel_path_template = "/v1/tasks/{task_id}/cancel"
+
+# HTTP 请求超时秒数
+request_timeout_seconds = 20.0
+
+# 是否校验 HTTPS 证书。内网自签证书可临时关闭。
+verify_tls = true
+
+[permission]
+# 是否允许所有用户触发。建议保持 false，并配置 allowed_users。
+allow_all_users = false
+
+# 允许触发的用户。推荐写成 "qq:用户ID"；也兼容只写用户 ID。
+allowed_users = []
+
+# 允许触发的群或聊天流。可写群号、"qq:群号" 或 stream_id。空列表表示不限制聊天流。
+allowed_groups = []
+
+[task]
+# 帮助文本默认展示的主命令前缀。命令组件当前固定支持 /codex 和 /agent。
+command_prefix = "/codex"
+
+# 执行模式：local 表示直接调用本机 Codex CLI；remote 表示调用 server.base_url。
+execution_mode = "local"
+
+# 是否允许取消远程任务
+enable_cancel = true
+
+# 提交给远程服务的任务类型
+task_type = "codex_cli"
+
+# 单个聊天流同时运行的最大任务数
+max_running_tasks_per_stream = 1
+
+# 单个用户同时运行的最大任务数
+max_running_tasks_per_user = 1
+
+# 轮询远程任务状态间隔，单位秒
+poll_interval_seconds = 5.0
+
+# 单个任务最长跟踪时间，单位秒。远程任务可能继续运行，但插件会停止转发。
+max_watch_seconds = 3600.0
+
+[local_codex]
+# Codex CLI 可执行文件名或绝对路径。
+codex_binary = "codex"
+
+# 本地任务根目录。相对路径按 MaiBot 进程工作目录解析。
+work_root = "data/remote_codex_agent/tasks"
+
+# Codex CLI 的沙箱模式。推荐 workspace-write。
+sandbox = "workspace-write"
+
+# Codex CLI 的审批策略。服务器无人值守时推荐 never。
+approval_policy = "never"
+
+# 可选模型名，留空则使用 Codex CLI 默认配置。
+model = ""
+
+# 是否传递 --search。取决于服务器上的 Codex CLI 版本是否支持。
+enable_search = false
+
+# 额外传给 codex exec 的参数，例如 ["--profile", "server-agent"]。
+extra_args = []
+
+# 本地 Codex 任务运行超时，单位秒。
+process_timeout_seconds = 3600.0
+
+# 产物匹配规则，会在任务 workspace 下扫描。
+artifact_globs = ["artifacts/*", "*.docx", "*.pdf", "*.md", "*.zip", "*.xlsx", "*.pptx"]
+
+[progress]
+# 是否把运行进度转发到 QQ
+forward_progress = true
+
+# 进度消息最小发送间隔，单位秒
+min_send_interval_seconds = 5.0
+
+# 每次最多合并多少条进度
+max_progress_items_per_message = 5
+
+# 单条进度最大字符数
+max_progress_item_chars = 300
+
+# 最终摘要最大字符数
+max_summary_chars = 1800
+
+[artifact]
+# 是否在完成时发送产物列表或下载链接
+send_artifact_links = true
+
+# 如果远程服务返回 artifact.custom_payload，是否尝试用 send.custom 发送文件消息。
+# 只有当前 QQ 适配器支持对应自定义消息时才会成功。
+try_custom_file_message = false
+
+# 自定义文件消息类型。不同适配器可能不同，例如 "file"。
+custom_file_message_type = "file"
+
+[napcat]
+# 是否启用 NapCat HTTP API 直接上传产物文件。
+# 需要在 NapCat WebUI 中为本 bot 新建 HTTP 服务器。
+enabled = false
+
+# NapCat HTTP Server 协议：http 或 https。
+scheme = "http"
+
+# NapCat HTTP Server 地址。和 MaiBot 同机部署通常填 127.0.0.1。
+host = "127.0.0.1"
+
+# NapCat HTTP Server 端口，例如在 NapCat WebUI 里新增 9998。
+port = 9998
+
+# NapCat HTTP Server token。若 NapCat 该端口未设置 token，留空。
+token = ""
+
+# 上传请求超时秒数。大文件可适当调高。
+request_timeout_seconds = 120.0
+
+# 调用 upload_group_file/upload_private_file 时是否执行真实上传。
+upload_file = true
+
+# 单个产物最大上传大小，单位 MB。0 表示不限制。
+max_file_size_mb = 100.0
