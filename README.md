@@ -46,6 +46,7 @@ MaiBot/
       _manifest.json
       README.md
 ```
+*如果你不想进行下面的部署,可以让AI阅读项目下的DEPLOYMENT_AI.md文档让他进行部署.如果遇到部署问题,可以附上DEVELOPMENT_AI.md文档*
 
 ### 2. 安装插件依赖
 
