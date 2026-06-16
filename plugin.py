@@ -522,6 +522,12 @@ def _looks_like_final_progress(text: str) -> bool:
     return any(marker in cleaned for marker in final_markers)
 
 
+def _contains_cjk(text: str) -> bool:
+    """判断文本是否包含中文或其他 CJK 字符。"""
+
+    return bool(re.search(r"[\u3400-\u9fff]", str(text or "")))
+
+
 def _display_task_kind(task_id: str) -> str:
     """返回用户可见的任务类型。"""
 
@@ -2284,7 +2290,7 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
         lines = ["可用 Codex skills："]
         for index, skill in enumerate(skills[:30], start=1):
             name = skill.get("name") or "未命名"
-            description = skill.get("description") or "无描述"
+            description = self._localize_skill_description(name, skill.get("description") or "")
             lines.append(f"{index}. {name}：{_truncate_text(description, 80)}")
         if len(skills) > 30:
             lines.append(f"还有 {len(skills) - 30} 个未显示。")
@@ -2315,7 +2321,8 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
                 parts.append(transport)
             if detail:
                 parts.append(_truncate_text(detail, 60))
-            lines.append(f"{index}. {name}：{' / '.join(parts)}")
+            description = self._localize_mcp_description(server)
+            lines.append(f"{index}. {name}：{description}（{' / '.join(parts)}）")
         if len(servers) > 30:
             lines.append(f"还有 {len(servers) - 30} 个未显示。")
         lines.append("")
@@ -2586,6 +2593,28 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
         description = metadata.get("description") or ""
         return {"name": name, "description": description}
 
+    @staticmethod
+    def _localize_skill_description(name: str, description: str) -> str:
+        """优先返回 skill 的中文短描述。"""
+
+        normalized_name = str(name or "").strip().lower()
+        known_descriptions = {
+            "imagegen": "生成或编辑位图图片，适合照片、插画、贴图、素材和 UI 视觉稿。",
+            "openai-docs": "查询 OpenAI 和 Codex 官方文档，适合确认最新能力、配置和用法。",
+            "plugin-creator": "创建或维护 Codex 插件结构，生成插件清单和基础目录。",
+            "skill-creator": "创建或更新 Codex skill，整理可复用的专业工作流和说明。",
+            "skill-installer": "安装 Codex skills，支持官方精选 skill 或 GitHub 仓库路径。",
+        }
+        if normalized_name in known_descriptions:
+            return known_descriptions[normalized_name]
+
+        cleaned = " ".join(str(description or "").split())
+        if not cleaned:
+            return "暂无描述。"
+        if _contains_cjk(cleaned):
+            return cleaned
+        return f"暂无中文描述。原文：{_truncate_text(cleaned, 48)}"
+
     def _list_codex_mcp_servers(self) -> List[Dict[str, Any]]:
         """调用 codex mcp list --json 并规整输出。"""
 
@@ -2630,6 +2659,45 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
             elif normalized.get("command"):
                 normalized["transport"] = "stdio"
         return normalized
+
+    @staticmethod
+    def _localize_mcp_description(server: Dict[str, Any]) -> str:
+        """优先返回 MCP 服务器的中文短描述。"""
+
+        name = str(server.get("name") or "").strip()
+        normalized_name = name.lower()
+        known_descriptions = {
+            "openaiDeveloperDocs": "OpenAI 官方开发者文档查询服务。",
+            "openaideveloperdocs": "OpenAI 官方开发者文档查询服务。",
+            "github": "GitHub 仓库、议题和代码相关操作服务。",
+            "filesystem": "本地文件系统读写服务。",
+            "playwright": "浏览器自动化和页面测试服务。",
+            "postgres": "PostgreSQL 数据库访问服务。",
+            "sqlite": "SQLite 数据库访问服务。",
+            "fetch": "网页或 HTTP 内容读取服务。",
+            "memory": "长期记忆或知识存储服务。",
+        }
+        if normalized_name in known_descriptions:
+            return known_descriptions[normalized_name]
+
+        raw_description = str(
+            server.get("description")
+            or server.get("summary")
+            or server.get("title")
+            or ""
+        ).strip()
+        if raw_description:
+            cleaned = " ".join(raw_description.split())
+            if _contains_cjk(cleaned):
+                return _truncate_text(cleaned, 60)
+            return f"暂无中文描述，原文：{_truncate_text(cleaned, 36)}"
+
+        transport = str(server.get("transport") or server.get("type") or "").strip().lower()
+        if transport == "stdio":
+            return "通过本地命令启动的 MCP 服务。"
+        if transport in {"http", "sse", "streamable-http"}:
+            return "通过网络地址连接的 MCP 服务。"
+        return "暂无中文描述。"
 
     def _read_codex_user_config(self) -> Dict[str, Any]:
         """读取本机 Codex 用户配置。"""
