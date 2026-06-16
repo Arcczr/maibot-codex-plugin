@@ -46,7 +46,7 @@ MaiBot/
       _manifest.json
       README.md
 ```
-*如果你不想进行下面的部署,可以让AI阅读项目下的DEPLOYMENT_AI.md文档让他进行部署.如果遇到部署问题,可以附上DEVELOPMENT_AI.md文档*
+*如果你不想进行下面的部署,可以让AI阅读项目下的DEPLOYMENT_AI.md文档让他进行部署.如果遇到部署问题,可以附上DEVELOPMENT_AI.md文档。但建议你阅读完本说明*
 
 ### 2. 安装插件依赖
 
@@ -82,7 +82,7 @@ codex -a never exec --json --color never -s workspace-write --skip-git-repo-chec
 编辑：
 
 ```bash
-/root/functional_project/maimai/MaiBot/plugins/remote_codex_agent/config.toml
+../MaiBot/plugins/remote_codex_agent/config.toml
 ```
 
 最小可用配置：
@@ -120,7 +120,7 @@ allow_all_users = true
 在 MaiBot 根目录启动：
 
 ```bash
-cd /root/functional_project/maimai/MaiBot
+cd ../MaiBot
 uv run bot.py
 ```
 
