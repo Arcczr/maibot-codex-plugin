@@ -454,6 +454,8 @@ data/remote_codex_agent/tasks/_records/
 
 ## 远程模式
 
+#### 注意：以下内容未进行调试和验证，不确保其可用性
+
 如果你把配置改成：
 
 ```toml
