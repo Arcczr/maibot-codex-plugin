@@ -217,6 +217,7 @@ class RemoteTaskState:
     last_progress_cursor: str = ""
     sent_progress_ids: set[str] = field(default_factory=set)
     last_progress_sent_at: float = 0.0
+    pending_local_progress_text: str = ""
     watch_task: Optional[asyncio.Task[None]] = None
     process: Optional[asyncio.subprocess.Process] = None
     workspace_dir: str = ""
@@ -1076,7 +1077,8 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
         normalized = self._safe_record_name(session_name)
         if not normalized:
             return None
-        return self._read_json_file(self._session_records_dir() / f"{normalized}.json")
+        record = self._read_json_file(self._session_records_dir() / f"{normalized}.json")
+        return self._hydrate_session_history(record) if record else None
 
     def _write_session_record(self, record: Dict[str, Any]) -> None:
         """写入 session 记录。"""
@@ -1090,6 +1092,84 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
         record["updated_at"] = time.time()
         self._write_json_file(self._session_records_dir() / f"{name}.json", record)
 
+    def _task_record_to_history_item(self, record: Dict[str, Any]) -> Dict[str, Any]:
+        """把 task 记录压缩成 session history 条目。"""
+
+        return {
+            "task_id": str(record.get("task_id") or ""),
+            "prompt": str(record.get("prompt") or ""),
+            "last_status": str(record.get("last_status") or "unknown"),
+            "created_at": record.get("created_at") or 0,
+            "updated_at": record.get("updated_at") or record.get("created_at") or 0,
+            "codex_thread_id": str(record.get("codex_thread_id") or ""),
+            "parent_task_id": str(record.get("parent_task_id") or ""),
+            "artifacts": _coerce_artifacts(record.get("artifacts") or []),
+        }
+
+    @staticmethod
+    def _merge_session_history(history: List[Dict[str, Any]], item: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """按 task_id 合并 session history。"""
+
+        task_id = str(item.get("task_id") or "").strip()
+        if not task_id:
+            return history
+        merged = []
+        replaced = False
+        for old_item in history:
+            if str(old_item.get("task_id") or "") == task_id:
+                merged.append(item)
+                replaced = True
+            else:
+                merged.append(old_item)
+        if not replaced:
+            merged.append(item)
+        merged.sort(key=lambda value: float(value.get("updated_at") or value.get("created_at") or 0))
+        return merged
+
+    def _hydrate_session_history(self, record: Dict[str, Any]) -> Dict[str, Any]:
+        """为旧 session 记录回填 task_ids/history。"""
+
+        session_name = str(record.get("session_name") or "").strip()
+        stream_id = str(record.get("stream_id") or "")
+        platform = str(record.get("platform") or "")
+        user_id = str(record.get("user_id") or "")
+        if not session_name:
+            return record
+
+        history = record.get("history")
+        normalized_history = [item for item in history if isinstance(item, dict)] if isinstance(history, list) else []
+        seen_ids = {str(item.get("task_id") or "") for item in normalized_history if str(item.get("task_id") or "")}
+
+        for path in self._task_records_dir().glob("*.json"):
+            task_record = self._read_json_file(path)
+            if not task_record:
+                continue
+            if str(task_record.get("record_type") or "task") != "session":
+                continue
+            if str(task_record.get("session_name") or "") != session_name:
+                continue
+            if stream_id and str(task_record.get("stream_id") or "") != stream_id:
+                continue
+            if platform and str(task_record.get("platform") or "") != platform:
+                continue
+            if user_id and str(task_record.get("user_id") or "") != user_id:
+                continue
+            task_id = str(task_record.get("task_id") or "")
+            if task_id and task_id not in seen_ids:
+                normalized_history.append(self._task_record_to_history_item(task_record))
+                seen_ids.add(task_id)
+
+        current_task_id = str(record.get("task_id") or "").strip()
+        if current_task_id and current_task_id not in seen_ids:
+            normalized_history.append(self._task_record_to_history_item(record))
+
+        normalized_history.sort(key=lambda value: float(value.get("updated_at") or value.get("created_at") or 0))
+        record["history"] = normalized_history
+        record["task_ids"] = [str(item.get("task_id") or "") for item in normalized_history if str(item.get("task_id") or "")]
+        if normalized_history and not str(record.get("latest_task_id") or "").strip():
+            record["latest_task_id"] = str(normalized_history[-1].get("task_id") or "")
+        return record
+
     def _update_session_from_task(
         self,
         task_state: RemoteTaskState,
@@ -1100,9 +1180,15 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
         if not task_state.session_name:
             return
         record = self._load_session_record(task_state.session_name) or {}
-        record.update(self._task_state_to_record(task_state, artifacts=artifacts))
+        record = self._hydrate_session_history(record)
+        task_record = self._task_state_to_record(task_state, artifacts=artifacts)
+        history = [item for item in record.get("history", []) if isinstance(item, dict)]
+        history = self._merge_session_history(history, self._task_record_to_history_item(task_record))
+        record.update(task_record)
         record["session_name"] = task_state.session_name
         record["latest_task_id"] = task_state.task_id
+        record["history"] = history
+        record["task_ids"] = [str(item.get("task_id") or "") for item in history if str(item.get("task_id") or "")]
         self._write_session_record(record)
 
     def _cleanup_expired_task_records(self) -> None:
@@ -1665,6 +1751,7 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
                 await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
 
             task_state.last_status = "succeeded" if process.returncode == 0 else "failed"
+            self._discard_pending_local_progress(task_state)
             artifacts = self._collect_local_artifacts(workspace_dir)
             final_data = {
                 "status": task_state.last_status,
@@ -1770,7 +1857,7 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
                 self._capture_codex_thread_id(task_state, line)
                 progress_text = self._extract_progress_from_codex_line(line)
                 if progress_text:
-                    await self._send_local_progress(task_state, progress_text)
+                    await self._queue_local_progress(task_state, progress_text)
 
     async def _consume_local_stderr(self, process: asyncio.subprocess.Process, stderr_log: Path) -> None:
         """记录 Codex stderr。"""
@@ -1885,6 +1972,19 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
         max_chars = max(int(self.config.progress.max_progress_item_chars), 20)
         message = _format_progress_message(task_state.task_id, [progress_text], max_chars)
         await self.ctx.send.text(message, task_state.stream_id)
+
+    async def _queue_local_progress(self, task_state: RemoteTaskState, progress_text: str) -> None:
+        """延后一条本机进度，避免把最终回答提前当进度发出。"""
+
+        pending_text = task_state.pending_local_progress_text
+        if pending_text:
+            await self._send_local_progress(task_state, pending_text)
+        task_state.pending_local_progress_text = progress_text
+
+    def _discard_pending_local_progress(self, task_state: RemoteTaskState) -> None:
+        """丢弃最后一条本机进度；它通常就是 final 摘要。"""
+
+        task_state.pending_local_progress_text = ""
 
     def _read_local_final_message(
         self,
@@ -2261,10 +2361,19 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
         if session_records:
             lines.append("session：")
             for record in session_records:
+                history = [item for item in record.get("history", []) if isinstance(item, dict)]
                 lines.append(
                     f"- {record.get('session_name')}: {record.get('last_status', 'unknown')} / "
-                    f"{_truncate_text(str(record.get('prompt') or ''), 50)}"
+                    f"{len(history) or len(record.get('task_ids') or [])} 条记录"
                 )
+                recent_history = history[-5:]
+                for item in recent_history:
+                    artifact_count = len(_coerce_artifacts(item.get("artifacts") or []))
+                    artifact_text = f"，产物 {artifact_count} 个" if artifact_count else ""
+                    lines.append(
+                        f"  - {item.get('task_id')}: {item.get('last_status', 'unknown')}{artifact_text} / "
+                        f"{_truncate_text(str(item.get('prompt') or ''), 44)}"
+                    )
         if task_records:
             lines.append("task：")
             for record in task_records:
@@ -2567,6 +2676,7 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
             record_user = self._build_scoped_user(str(record.get("platform") or ""), str(record.get("user_id") or ""))
             if scoped_user and record_user != scoped_user:
                 continue
+            record = self._hydrate_session_history(record)
             records.append(record)
         records.sort(key=lambda item: float(item.get("updated_at") or item.get("created_at") or 0), reverse=True)
         return records[:limit]
@@ -2613,6 +2723,8 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
         record["record_type"] = "session"
         record["session_name"] = name
         record["latest_task_id"] = task_id
+        record["history"] = [self._task_record_to_history_item(record)]
+        record["task_ids"] = [task_id]
         self._write_session_record(record)
         await self.ctx.send.text(f"已将 task 转为 session：{name}\n继续：/codex continue <要求>", stream_id)
 
