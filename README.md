@@ -1,4 +1,4 @@
-# Codex CLI QQ 调度器
+# 麦麦掌握 Codex CLI 
 
 > [!NOTE]
 >
