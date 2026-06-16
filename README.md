@@ -26,7 +26,7 @@ QQ 用户发送 /codex
 进入 MaiBot 插件目录：
 
 ```bash
-cd /root/functional_project/maimai/MaiBot/plugins
+cd ../MaiBot/plugins
 ```
 
 把本仓库放到 `remote_codex_agent` 目录：
