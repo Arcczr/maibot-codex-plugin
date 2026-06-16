@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+*.log
+.env.local
+maibot-文档中心/
+server-codex-napcat-file-upload-runbook.md
+maibot-文档中心/
+server-codex-napcat-file-upload-runbook.md
