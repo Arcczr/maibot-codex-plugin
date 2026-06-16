@@ -53,7 +53,7 @@ MaiBot/
 插件依赖 `httpx`。如果 MaiBot 使用 `uv` 启动，建议在 MaiBot 根目录执行：
 
 ```bash
-cd /root/functional_project/maimai/MaiBot
+cd ../MaiBot
 uv add httpx
 ```
 
