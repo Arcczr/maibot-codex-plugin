@@ -22,7 +22,7 @@ import json
 import time
 
 
-PLUGIN_ID = "local.remote-codex-agent"
+PLUGIN_ID = "arcczr.remote-codex-agent"
 TERMINAL_STATUSES = {"succeeded", "failed", "cancelled"}
 ACTIVE_STATUSES = {"queued", "running"}
 SUPPORTED_COMMAND_PREFIXES = ("/codex", "/agent")

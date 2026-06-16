@@ -4,19 +4,19 @@
   "name": "Codex CLI QQ 调度器",
   "description": "通过 QQ 命令在 MaiBot 所在服务器上运行 Codex CLI，并可通过 NapCat HTTP API 将产物文件直传回当前聊天流；也保留远程 HTTP Agent 模式。",
   "author": {
-    "name": "MaiBot Local",
-    "url": "https://github.com/Mai-with-u"
+    "name": "Arcczr",
+    "url": "https://github.com/Arcczr"
   },
   "license": "MIT",
   "urls": {
-    "repository": "https://github.com/Mai-with-u/maibot",
-    "homepage": "https://github.com/Mai-with-u/maibot",
-    "documentation": "https://github.com/Mai-with-u/maibot-plugin-sdk/blob/main/docs/guide.md",
-    "issues": "https://github.com/Mai-with-u/maibot/issues"
+    "repository": "https://github.com/Arcczr/maibot-codex-plugin",
+    "homepage": "https://github.com/Arcczr/maibot-codex-plugin",
+    "documentation": "https://github.com/Arcczr/maibot-codex-plugin#readme",
+    "issues": "https://github.com/Arcczr/maibot-codex-plugin/issues"
   },
   "host_application": {
     "min_version": "1.0.0",
-    "max_version": "1.0.0"
+    "max_version": "1.99.99"
   },
   "sdk": {
     "min_version": "2.5.2",
@@ -49,5 +49,5 @@
       "zh-CN"
     ]
   },
-  "id": "local.remote-codex-agent"
+  "id": "arcczr.remote-codex-agent"
 }
