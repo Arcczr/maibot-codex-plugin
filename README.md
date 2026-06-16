@@ -21,14 +21,6 @@ QQ 用户发送 /codex
 
 ## 快速开始
 
-下面按“一台新的设备已经有 MaiBot 和 Python”的角度说明。示例假设 MaiBot 位于：
-
-```bash
-/root/functional_project/maimai/MaiBot
-```
-
-如果你的路径不同，把命令里的路径替换成自己的 MaiBot 根目录。
-
 ### 1. 放置插件
 
 进入 MaiBot 插件目录：
@@ -66,7 +58,7 @@ uv add httpx
 
 如果你的 MaiBot 项目不希望修改依赖文件，也可以按你当前环境的方式安装 `httpx`，只要启动 MaiBot 的 Python 环境能 import `httpx` 即可。
 
-### 3. 准备 Codex CLI
+### 3. 准备 Codex CLI(若已有则忽略)
 
 在运行 MaiBot 的同一个系统用户下安装并登录 Codex CLI。
 
@@ -99,7 +91,7 @@ codex -a never exec --json --color never -s workspace-write --skip-git-repo-chec
 enabled = true
 
 [permission]
-allow_all_users = false
+allow_all_users = false(一定要检查一遍这一项)
 allowed_users = ["qq:你的QQ号"]
 allowed_groups = []
 
