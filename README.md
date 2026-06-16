@@ -1,6 +1,11 @@
-# Codex CLI QQ 调度器
+# Codex CLI 麦麦调度器
 
-这个插件让 QQ 群里的命令在 MaiBot 所在服务器上触发 `codex exec --json`。默认执行模式是 `local`：QQ 机器人和 Codex CLI 在同一台 Ubuntu 服务器上，插件直接启动本机 Codex CLI 子进程，并把运行进度、最终摘要和产物路径回传到当前聊天流。
+> [!NOTE]
+>
+> **免责声明**
+> 本插件代码由 **Codex** 进行编写。作者不对因使用本插件或其生成内容所导致的任何直接或间接的问题、损失或纠纷承担任何责任。**请用户自行评估风险并谨慎使用**。
+
+这个插件让发给麦麦的命令在 MaiBot 所在服务器上触发 `codex exec --json`，从而达到麦麦控制codex CLI的效果。默认执行模式是 `local`。当麦麦和 Codex CLI 在同一台 Ubuntu 服务器上时，可以配置使插件直接启动本机 Codex CLI 子进程。麦麦会将运行进度、最终摘要和产物回传到当前聊天流。
 
 插件也保留 `remote` 模式，后续如果你想把 Codex 执行器拆成独立 HTTP Agent 服务，可以继续使用。
 
@@ -15,13 +20,13 @@ codex -a never exec --json --color never -s workspace-write --skip-git-repo-chec
 2. 配置 `config.toml`：
    - `plugin.enabled = true`
    - `task.execution_mode = "local"`
-   - `permission.allowed_users = ["qq:你的QQ号"]`
+   - 按需配置`permission.allowed_users = ["qq:你的QQ号"]`
    - 按需配置 `permission.allowed_groups`
    - 确认 `local_codex.work_root` 指向服务器上允许写入的目录
 
 3. 重载或启动插件。
 
-4. 在 QQ 中发送：
+4. 在 QQ 中发送（示例）：
 
 ```text
 /codex 帮我搜索某个主题，整理成一份 Word 文档，并把产物放到 artifacts 目录
