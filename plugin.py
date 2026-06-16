@@ -10,6 +10,8 @@ import os
 from pathlib import Path
 import re
 import shutil
+import subprocess
+import tomllib
 from typing import Any, ClassVar, Dict, List, Optional
 from uuid import uuid4
 from maibot_sdk import Command, Field, MaiBotPlugin, PluginConfigBase
@@ -73,6 +75,7 @@ class PermissionConfig(PluginConfigBase):
 
     allow_all_users: bool = Field(default=False, description="是否允许所有用户触发")
     allowed_users: List[str] = Field(default_factory=list, description="允许触发的用户，推荐格式 qq:用户ID")
+    admin_users: List[str] = Field(default_factory=list, description="管理员用户，允许使用高危权限")
     allowed_groups: List[str] = Field(default_factory=list, description="允许触发的群号、qq:群号 或 stream_id")
 
 
@@ -91,6 +94,8 @@ class TaskConfig(PluginConfigBase):
     max_running_tasks_per_user: int = Field(default=1, description="单个用户同时运行的最大任务数")
     poll_interval_seconds: float = Field(default=5.0, description="轮询远程任务状态间隔")
     max_watch_seconds: float = Field(default=3600.0, description="单个任务最长跟踪时间")
+    resumable_task_ttl_hours: float = Field(default=24.0, description="普通 task 可继续对话的保留小时数")
+    require_session_confirm: bool = Field(default=True, description="把 task 转为 session 时是否要求二次确认")
 
 
 class LocalCodexConfig(PluginConfigBase):
@@ -217,6 +222,10 @@ class RemoteTaskState:
     workspace_dir: str = ""
     final_message_path: str = ""
     input_files: List[InputFile] = field(default_factory=list)
+    codex_thread_id: str = ""
+    record_type: str = "task"
+    session_name: str = ""
+    parent_task_id: str = ""
 
 
 class RemoteAgentClient:
@@ -575,6 +584,8 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
 
         self._client.update_config(self.config)
         self._napcat_client.update_config(self.config)
+        self._ensure_records_dirs()
+        self._cleanup_expired_task_records()
 
     async def on_unload(self) -> None:
         """插件卸载时停止本地轮询任务。"""
@@ -648,6 +659,54 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
             await self._handle_cancel(stream_id=stream_id, task_id=sub_arg)
             return True, "已处理取消命令", True
 
+        if sub_command in {"skills", "skill", "技能"}:
+            await self._handle_skills(stream_id=stream_id)
+            return True, "已查询 Codex skills", True
+
+        if sub_command == "mcp":
+            await self._handle_mcp(stream_id=stream_id)
+            return True, "已查询 Codex MCP", True
+
+        if sub_command in {"config", "配置"}:
+            await self._handle_config(stream_id=stream_id)
+            return True, "已查询 Codex 配置", True
+
+        if sub_command in {"list", "列表"}:
+            await self._handle_list(stream_id=stream_id, platform=platform, user_id=user_id)
+            return True, "已查询 Codex 记录", True
+
+        if sub_command == "session":
+            handled, message = await self._handle_session_command(
+                arg=sub_arg,
+                stream_id=stream_id,
+                platform=platform,
+                user_id=user_id,
+                group_id=group_id,
+                command_message=kwargs.get("message"),
+            )
+            return handled, message, True
+
+        if sub_command in {"continue", "继续"}:
+            handled, message = await self._handle_continue_command(
+                prompt=sub_arg,
+                stream_id=stream_id,
+                platform=platform,
+                user_id=user_id,
+                group_id=group_id,
+            )
+            return handled, message, True
+
+        if sub_command == "resume":
+            handled, message = await self._handle_resume_command(
+                arg=sub_arg,
+                stream_id=stream_id,
+                platform=platform,
+                user_id=user_id,
+                group_id=group_id,
+                command_message=kwargs.get("message"),
+            )
+            return handled, message, True
+
         execution_mode = self._get_execution_mode()
         if execution_mode == "remote":
             if not self.config.server.base_url.strip():
@@ -667,6 +726,10 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
             return False, limit_error, True
 
         if execution_mode == "local":
+            dangerous_error = self._check_dangerous_local_permission(platform=platform, user_id=user_id)
+            if dangerous_error:
+                await self.ctx.send.text(dangerous_error, stream_id)
+                return False, dangerous_error, True
             return await self._create_local_task(
                 prompt=command_body,
                 raw_command=raw_command,
@@ -731,6 +794,29 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
                 return "当前聊天流不允许触发远程 Codex Agent。"
 
         return ""
+
+    def _check_dangerous_local_permission(self, platform: str, user_id: str) -> str:
+        """限制 danger-full-access 仅管理员可用。"""
+
+        sandbox = str(self.config.local_codex.sandbox or "").strip().lower()
+        extra_args = " ".join(str(arg or "").strip().lower() for arg in self.config.local_codex.extra_args)
+        dangerous = sandbox == "danger-full-access" or "--dangerously-bypass-approvals-and-sandbox" in extra_args
+        if dangerous and not self._is_admin_user(platform, user_id):
+            return "当前 Codex 配置使用高危权限，仅管理员可以触发任务。"
+        return ""
+
+    def _is_admin_user(self, platform: str, user_id: str) -> bool:
+        """判断用户是否是插件管理员。"""
+
+        admins = _normalize_set(self.config.permission.admin_users)
+        if not admins:
+            return False
+        normalized_platform = str(platform or "").strip().lower()
+        normalized_user_id = str(user_id or "").strip().lower()
+        candidates = {normalized_user_id}
+        if normalized_platform and normalized_user_id:
+            candidates.add(f"{normalized_platform}:{normalized_user_id}")
+        return not admins.isdisjoint(candidates)
 
     def _check_running_limit(self, stream_id: str, platform: str, user_id: str) -> str:
         """检查并发任务数量限制。"""
@@ -830,6 +916,10 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
         user_id: str,
         group_id: str,
         command_message: Any = None,
+        record_type: str = "task",
+        session_name: str = "",
+        resume_thread_id: str = "",
+        parent_task_id: str = "",
     ) -> tuple[bool, str, bool]:
         """创建本机 Codex CLI 任务。"""
 
@@ -855,13 +945,32 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
             workspace_dir=str(workspace_dir),
             final_message_path=str(final_message_path),
             input_files=input_files,
+            record_type=record_type,
+            session_name=session_name,
+            codex_thread_id=resume_thread_id if resume_thread_id else "",
+            parent_task_id=parent_task_id,
         )
         self._tasks[task_id] = task_state
+        self._record_task_state(task_state)
+        if record_type == "session" and session_name:
+            self._update_session_from_task(task_state)
         task_state.watch_task = asyncio.create_task(
-            self._run_local_codex_task(task_state, task_dir, workspace_dir, prompt_path, final_message_path),
+            self._run_local_codex_task(
+                task_state,
+                task_dir,
+                workspace_dir,
+                prompt_path,
+                final_message_path,
+                resume_thread_id=resume_thread_id,
+            ),
             name=f"local_codex:{task_id}",
         )
-        created_message = f"本机 Codex 任务已创建：{task_id}"
+        if record_type == "session":
+            created_message = f"Codex session 任务已创建：{task_id}\n会话：{session_name}"
+        elif resume_thread_id:
+            created_message = f"Codex 续聊任务已创建：{task_id}"
+        else:
+            created_message = f"本机 Codex 任务已创建：{task_id}"
         if input_files:
             names = "、".join(item.name for item in input_files[:3])
             if len(input_files) > 3:
@@ -873,7 +982,9 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
     def _prepare_local_task_files(self, task_id: str, prompt: str) -> tuple[Path, Path, Path, Path]:
         """创建本地任务目录和 prompt 文件。"""
 
-        work_root = Path(self.config.local_codex.work_root).expanduser()
+        work_root = self._local_work_root()
+        if not work_root.is_absolute():
+            work_root = Path.cwd() / work_root
         task_dir = work_root / task_id
         workspace_dir = task_dir / "workspace"
         task_dir.mkdir(parents=True, exist_ok=False)
@@ -882,6 +993,163 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
         final_message_path = task_dir / "final.md"
         prompt_path.write_text(self._build_local_codex_prompt(prompt, []), encoding="utf-8")
         return task_dir, workspace_dir, prompt_path, final_message_path
+
+    def _local_work_root(self) -> Path:
+        """返回本地 Codex 工作根目录。"""
+
+        return Path(self.config.local_codex.work_root).expanduser()
+
+    def _records_root(self) -> Path:
+        """返回插件持久记录目录。"""
+
+        work_root = self._local_work_root()
+        if not work_root.is_absolute():
+            work_root = Path.cwd() / work_root
+        return work_root / "_records"
+
+    def _task_records_dir(self) -> Path:
+        return self._records_root() / "tasks"
+
+    def _session_records_dir(self) -> Path:
+        return self._records_root() / "sessions"
+
+    def _pending_session_dir(self) -> Path:
+        return self._records_root() / "pending_sessions"
+
+    def _ensure_records_dirs(self) -> None:
+        """确保记录目录存在。"""
+
+        self._task_records_dir().mkdir(parents=True, exist_ok=True)
+        self._session_records_dir().mkdir(parents=True, exist_ok=True)
+        self._pending_session_dir().mkdir(parents=True, exist_ok=True)
+
+    def _record_task_state(self, task_state: RemoteTaskState, artifacts: Optional[List[Dict[str, Any]]] = None) -> None:
+        """落盘保存 task 状态。"""
+
+        if not task_state.task_id:
+            return
+        self._ensure_records_dirs()
+        data = self._task_state_to_record(task_state, artifacts=artifacts)
+        self._write_json_file(self._task_records_dir() / f"{task_state.task_id}.json", data)
+
+    def _task_state_to_record(
+        self,
+        task_state: RemoteTaskState,
+        artifacts: Optional[List[Dict[str, Any]]] = None,
+    ) -> Dict[str, Any]:
+        """把任务状态转成可落盘 JSON。"""
+
+        return {
+            "task_id": task_state.task_id,
+            "record_type": task_state.record_type or "task",
+            "session_name": task_state.session_name,
+            "stream_id": task_state.stream_id,
+            "platform": task_state.platform,
+            "user_id": task_state.user_id,
+            "group_id": task_state.group_id,
+            "prompt": task_state.prompt,
+            "created_at": task_state.created_at,
+            "updated_at": time.time(),
+            "last_status": task_state.last_status,
+            "workspace_dir": task_state.workspace_dir,
+            "final_message_path": task_state.final_message_path,
+            "codex_thread_id": task_state.codex_thread_id,
+            "parent_task_id": task_state.parent_task_id,
+            "input_files": [item.__dict__ for item in task_state.input_files],
+            "artifacts": artifacts or [],
+        }
+
+    def _load_task_record(self, task_id: str) -> Optional[Dict[str, Any]]:
+        """读取 task 记录。"""
+
+        normalized = str(task_id or "").strip()
+        if not normalized:
+            return None
+        memory_task = self._tasks.get(normalized)
+        if memory_task is not None:
+            return self._task_state_to_record(memory_task)
+        return self._read_json_file(self._task_records_dir() / f"{normalized}.json")
+
+    def _load_session_record(self, session_name: str) -> Optional[Dict[str, Any]]:
+        """读取 session 记录。"""
+
+        normalized = self._safe_record_name(session_name)
+        if not normalized:
+            return None
+        return self._read_json_file(self._session_records_dir() / f"{normalized}.json")
+
+    def _write_session_record(self, record: Dict[str, Any]) -> None:
+        """写入 session 记录。"""
+
+        name = self._safe_record_name(str(record.get("session_name") or ""))
+        if not name:
+            raise RuntimeError("session 名称不能为空")
+        self._ensure_records_dirs()
+        record["session_name"] = name
+        record["record_type"] = "session"
+        record["updated_at"] = time.time()
+        self._write_json_file(self._session_records_dir() / f"{name}.json", record)
+
+    def _update_session_from_task(
+        self,
+        task_state: RemoteTaskState,
+        artifacts: Optional[List[Dict[str, Any]]] = None,
+    ) -> None:
+        """用一次任务执行结果更新 session 记录。"""
+
+        if not task_state.session_name:
+            return
+        record = self._load_session_record(task_state.session_name) or {}
+        record.update(self._task_state_to_record(task_state, artifacts=artifacts))
+        record["session_name"] = task_state.session_name
+        record["latest_task_id"] = task_state.task_id
+        self._write_session_record(record)
+
+    def _cleanup_expired_task_records(self) -> None:
+        """清理超过保留时间的普通 task 记录。"""
+
+        ttl_hours = float(self.config.task.resumable_task_ttl_hours)
+        if ttl_hours <= 0:
+            return
+        cutoff = time.time() - ttl_hours * 3600
+        for path in self._task_records_dir().glob("*.json"):
+            record = self._read_json_file(path)
+            if not record:
+                continue
+            if str(record.get("record_type") or "task") == "session":
+                continue
+            updated_at = float(record.get("updated_at") or record.get("created_at") or 0)
+            if updated_at and updated_at < cutoff:
+                try:
+                    path.unlink()
+                except OSError:
+                    continue
+
+    @staticmethod
+    def _read_json_file(path: Path) -> Optional[Dict[str, Any]]:
+        """读取 JSON 对象。"""
+
+        try:
+            if not path.exists():
+                return None
+            data = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+        except (OSError, json.JSONDecodeError):
+            return None
+        return data if isinstance(data, dict) else None
+
+    @staticmethod
+    def _write_json_file(path: Path, data: Dict[str, Any]) -> None:
+        """写入 JSON 对象。"""
+
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    @staticmethod
+    def _safe_record_name(name: str) -> str:
+        """生成安全记录名。"""
+
+        cleaned = re.sub(r"[^0-9A-Za-z_.\-\u4e00-\u9fff]+", "_", str(name or "").strip()).strip("._-")
+        return cleaned[:80]
 
     def _build_local_codex_prompt(self, prompt: str, input_files: List[InputFile]) -> str:
         """构造发给本机 Codex CLI 的 prompt。"""
@@ -1348,6 +1616,7 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
         workspace_dir: Path,
         prompt_path: Path,
         final_message_path: Path,
+        resume_thread_id: str = "",
     ) -> None:
         """运行本机 Codex CLI 并转发输出。"""
 
@@ -1355,7 +1624,7 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
         stderr_log = task_dir / "stderr.log"
         task_state.last_status = "running"
 
-        command = self._build_local_codex_command(workspace_dir, final_message_path)
+        command = self._build_local_codex_command(workspace_dir, final_message_path, resume_thread_id=resume_thread_id)
         self.ctx.logger.info("启动本机 Codex 任务 %s: %s", task_state.task_id, " ".join(command))
 
         try:
@@ -1396,6 +1665,7 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
                 await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
 
             task_state.last_status = "succeeded" if process.returncode == 0 else "failed"
+            artifacts = self._collect_local_artifacts(workspace_dir)
             final_data = {
                 "status": task_state.last_status,
                 "summary": self._read_local_final_message(
@@ -1404,8 +1674,11 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
                     stdout_log,
                     process.returncode,
                 ),
-                "artifacts": self._collect_local_artifacts(workspace_dir),
+                "artifacts": artifacts,
             }
+            self._record_task_state(task_state, artifacts=artifacts)
+            if task_state.record_type == "session" and task_state.session_name:
+                self._update_session_from_task(task_state, artifacts=artifacts)
             await self._send_final_result(task_state, final_data)
         except asyncio.CancelledError:
             if task_state.process is not None and task_state.process.returncode is None:
@@ -1415,7 +1688,12 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
             task_state.last_status = "failed"
             await self.ctx.send.text(f"本机 Codex 任务 {task_state.task_id} 执行失败：{exc}", task_state.stream_id)
 
-    def _build_local_codex_command(self, workspace_dir: Path, final_message_path: Path) -> List[str]:
+    def _build_local_codex_command(
+        self,
+        workspace_dir: Path,
+        final_message_path: Path,
+        resume_thread_id: str = "",
+    ) -> List[str]:
         """构造本机 Codex CLI 命令。"""
 
         local_config = self.config.local_codex
@@ -1423,22 +1701,22 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
             local_config.codex_binary.strip() or "codex",
             "-a",
             local_config.approval_policy.strip() or "never",
-            "exec",
-            "--json",
-            "--color",
-            "never",
             "-s",
             local_config.sandbox.strip() or "workspace-write",
             "-C",
             str(workspace_dir),
-            "--skip-git-repo-check",
-            "--output-last-message",
-            str(final_message_path),
         ]
-        if local_config.model.strip():
-            command.extend(["-m", local_config.model.strip()])
         if local_config.enable_search:
             command.append("--search")
+        command.append("exec")
+        if resume_thread_id:
+            command.extend(["resume", resume_thread_id])
+        command.append("--json")
+        if not resume_thread_id:
+            command.extend(["--color", "never"])
+        command.extend(["--skip-git-repo-check", "--output-last-message", str(final_message_path)])
+        if local_config.model.strip():
+            command.extend(["-m", local_config.model.strip()])
         command.extend(str(arg) for arg in local_config.extra_args if str(arg).strip())
         command.append("-")
         return command
@@ -1489,6 +1767,7 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
                     continue
                 log_file.write(f"{line}\n")
                 log_file.flush()
+                self._capture_codex_thread_id(task_state, line)
                 progress_text = self._extract_progress_from_codex_line(line)
                 if progress_text:
                     await self._send_local_progress(task_state, progress_text)
@@ -1507,6 +1786,24 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
                 line = line_bytes.decode("utf-8", errors="replace").rstrip()
                 log_file.write(f"{line}\n")
                 log_file.flush()
+
+    def _capture_codex_thread_id(self, task_state: RemoteTaskState, line: str) -> None:
+        """从 Codex JSONL 里捕获 thread_id。"""
+
+        if task_state.codex_thread_id:
+            return
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            return
+        if not isinstance(event, dict):
+            return
+        thread_id = str(event.get("thread_id") or event.get("conversation_id") or "").strip()
+        if not thread_id and event.get("type") == "thread.started":
+            thread_id = str(event.get("thread_id") or "").strip()
+        if thread_id:
+            task_state.codex_thread_id = thread_id
+            self._record_task_state(task_state)
 
     def _extract_progress_from_codex_line(self, line: str) -> str:
         """从 Codex JSONL 或普通文本输出中抽取适合转发的进度。"""
@@ -1876,10 +2173,467 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
         message = str(data.get("message") or "已请求取消远程任务").strip()
         await self.ctx.send.text(f"任务 {normalized_task_id}: {message}", stream_id)
 
+    async def _handle_skills(self, stream_id: str) -> None:
+        """列出可用 Codex skills。"""
+
+        skills = self._list_codex_skills()
+        if not skills:
+            await self.ctx.send.text("当前未发现可用 Codex skill。", stream_id)
+            return
+
+        lines = ["可用 Codex skills："]
+        for index, skill in enumerate(skills[:30], start=1):
+            name = skill.get("name") or "未命名"
+            description = skill.get("description") or "无描述"
+            lines.append(f"{index}. {name}：{_truncate_text(description, 80)}")
+        if len(skills) > 30:
+            lines.append(f"还有 {len(skills) - 30} 个未显示。")
+        await self.ctx.send.text("\n".join(lines), stream_id)
+
+    async def _handle_mcp(self, stream_id: str) -> None:
+        """列出当前 Codex MCP 服务器。"""
+
+        try:
+            servers = await asyncio.to_thread(self._list_codex_mcp_servers)
+        except Exception as exc:
+            await self.ctx.send.text(f"读取 Codex MCP 配置失败：{exc}", stream_id)
+            return
+
+        if not servers:
+            await self.ctx.send.text("当前未配置 Codex MCP 服务器。", stream_id)
+            return
+
+        lines = ["Codex MCP 服务器："]
+        for index, server in enumerate(servers[:30], start=1):
+            name = str(server.get("name") or "未命名").strip()
+            enabled = server.get("enabled")
+            status = "启用" if enabled is not False else "停用"
+            transport = str(server.get("transport") or server.get("type") or "").strip()
+            detail = str(server.get("command") or server.get("url") or "").strip()
+            parts = [status]
+            if transport:
+                parts.append(transport)
+            if detail:
+                parts.append(_truncate_text(detail, 60))
+            lines.append(f"{index}. {name}：{' / '.join(parts)}")
+        if len(servers) > 30:
+            lines.append(f"还有 {len(servers) - 30} 个未显示。")
+        lines.append("")
+        lines.append("默认策略：任务会使用本机 Codex 当前启用的 MCP。")
+        await self.ctx.send.text("\n".join(lines), stream_id)
+
+    async def _handle_config(self, stream_id: str) -> None:
+        """列出当前插件和 Codex 关键配置。"""
+
+        user_config = self._read_codex_user_config()
+        local_model = str(self.config.local_codex.model or "").strip()
+        default_model = str(user_config.get("model") or "").strip()
+        model = local_model or default_model or "Codex 默认模型"
+        reasoning = str(user_config.get("model_reasoning_effort") or "未设置").strip()
+        provider = str(user_config.get("model_provider") or "默认").strip()
+        lines = [
+            "Codex 当前配置：",
+            f"模型：{model}",
+            f"推理强度：{reasoning}",
+            f"模型提供方：{provider}",
+            f"执行模式：{self._get_execution_mode()}",
+            f"沙箱：{self.config.local_codex.sandbox}",
+            f"审批策略：{self.config.local_codex.approval_policy}",
+            f"联网搜索：{'启用' if self.config.local_codex.enable_search else '停用'}",
+            f"进度转发：{'启用' if self.config.progress.forward_progress else '停用'}",
+            f"NapCat 直传：{'启用' if self.config.napcat.enabled else '停用'}",
+        ]
+        if local_model:
+            lines.append("说明：模型来自插件 local_codex.model。")
+        elif default_model:
+            lines.append("说明：模型来自本机 Codex 用户配置。")
+        else:
+            lines.append("说明：模型未显式配置，由 Codex CLI 自行选择默认值。")
+        await self.ctx.send.text("\n".join(lines), stream_id)
+
+    async def _handle_list(self, stream_id: str, platform: str, user_id: str) -> None:
+        """列出当前用户可见的最近 task/session。"""
+
+        scoped_user = self._build_scoped_user(platform, user_id)
+        task_records = self._list_task_records(stream_id=stream_id, scoped_user=scoped_user, limit=8)
+        session_records = self._list_session_records(stream_id=stream_id, scoped_user=scoped_user, limit=8)
+        lines = ["Codex 记录："]
+        if session_records:
+            lines.append("session：")
+            for record in session_records:
+                lines.append(
+                    f"- {record.get('session_name')}: {record.get('last_status', 'unknown')} / "
+                    f"{_truncate_text(str(record.get('prompt') or ''), 50)}"
+                )
+        if task_records:
+            lines.append("task：")
+            for record in task_records:
+                lines.append(
+                    f"- {record.get('task_id')}: {record.get('last_status', 'unknown')} / "
+                    f"{_truncate_text(str(record.get('prompt') or ''), 50)}"
+                )
+        if len(lines) == 1:
+            lines.append("当前没有可显示的记录。")
+        await self.ctx.send.text("\n".join(lines), stream_id)
+
+    async def _handle_session_command(
+        self,
+        arg: str,
+        stream_id: str,
+        platform: str,
+        user_id: str,
+        group_id: str,
+        command_message: Any = None,
+    ) -> tuple[bool, str]:
+        """处理 /codex session。"""
+
+        if self._get_execution_mode() != "local":
+            await self.ctx.send.text("session 仅支持本机 local 模式。", stream_id)
+            return False, "session 不支持远程模式"
+
+        stripped = arg.strip()
+        if not stripped:
+            await self._handle_list(stream_id=stream_id, platform=platform, user_id=user_id)
+            return True, "已查询 session"
+
+        parts = stripped.split(maxsplit=2)
+        target = parts[0]
+        if self._looks_like_task_id(target):
+            confirm = len(parts) >= 2 and parts[1].lower() in {"confirm", "确认"}
+            session_name = parts[2].strip() if len(parts) >= 3 else target
+            if not confirm and self.config.task.require_session_confirm:
+                await self.ctx.send.text(
+                    f"将 task 转为 session 需要确认。\n用法：/codex session {target} confirm {session_name}",
+                    stream_id,
+                )
+                return True, "已请求 session 转换确认"
+            await self._convert_task_to_session(target, session_name, stream_id, platform, user_id)
+            return True, "已处理 session 转换"
+
+        if len(parts) < 2:
+            await self.ctx.send.text("用法：/codex session <会话名> <任务描述>", stream_id)
+            return False, "session 参数不足"
+
+        session_name = self._safe_record_name(parts[0])
+        prompt = stripped[len(parts[0]) :].strip()
+        if not session_name or not prompt:
+            await self.ctx.send.text("用法：/codex session <会话名> <任务描述>", stream_id)
+            return False, "session 参数不足"
+        if self._load_session_record(session_name):
+            await self.ctx.send.text(f"session 已存在：{session_name}\n继续它：/codex continue {prompt}", stream_id)
+            return False, "session 已存在"
+        dangerous_error = self._check_dangerous_local_permission(platform=platform, user_id=user_id)
+        if dangerous_error:
+            await self.ctx.send.text(dangerous_error, stream_id)
+            return False, dangerous_error
+
+        result = await self._create_local_task(
+            prompt=prompt,
+            raw_command=f"/codex session {stripped}",
+            stream_id=stream_id,
+            platform=platform,
+            user_id=user_id,
+            group_id=group_id,
+            command_message=command_message,
+            record_type="session",
+            session_name=session_name,
+        )
+        return result[0], result[1]
+
+    async def _handle_continue_command(
+        self,
+        prompt: str,
+        stream_id: str,
+        platform: str,
+        user_id: str,
+        group_id: str,
+    ) -> tuple[bool, str]:
+        """继续当前用户最近 session。"""
+
+        if self._get_execution_mode() != "local":
+            await self.ctx.send.text("continue 仅支持本机 local 模式。", stream_id)
+            return False, "continue 不支持远程模式"
+        dangerous_error = self._check_dangerous_local_permission(platform=platform, user_id=user_id)
+        if dangerous_error:
+            await self.ctx.send.text(dangerous_error, stream_id)
+            return False, dangerous_error
+        if not prompt.strip():
+            await self.ctx.send.text("用法：/codex continue <继续处理的要求>", stream_id)
+            return False, "continue 缺少要求"
+
+        scoped_user = self._build_scoped_user(platform, user_id)
+        sessions = self._list_session_records(stream_id=stream_id, scoped_user=scoped_user, limit=1)
+        if not sessions:
+            await self.ctx.send.text("当前用户在这个聊天流里没有可继续的 session。", stream_id)
+            return False, "没有可继续 session"
+        session_record = sessions[0]
+        thread_id = str(session_record.get("codex_thread_id") or "").strip()
+        if not thread_id:
+            await self.ctx.send.text("最近 session 缺少 Codex thread_id，不能继续。", stream_id)
+            return False, "session 缺少 thread_id"
+        result = await self._create_local_task(
+            prompt=prompt,
+            raw_command=f"/codex continue {prompt}",
+            stream_id=stream_id,
+            platform=platform,
+            user_id=user_id,
+            group_id=group_id,
+            record_type="session",
+            session_name=str(session_record.get("session_name") or ""),
+            resume_thread_id=thread_id,
+            parent_task_id=str(session_record.get("latest_task_id") or session_record.get("task_id") or ""),
+        )
+        return result[0], result[1]
+
+    async def _handle_resume_command(
+        self,
+        arg: str,
+        stream_id: str,
+        platform: str,
+        user_id: str,
+        group_id: str,
+        command_message: Any = None,
+    ) -> tuple[bool, str]:
+        """恢复指定 task/session/thread。"""
+
+        del command_message
+        if self._get_execution_mode() != "local":
+            await self.ctx.send.text("resume 仅支持本机 local 模式。", stream_id)
+            return False, "resume 不支持远程模式"
+        dangerous_error = self._check_dangerous_local_permission(platform=platform, user_id=user_id)
+        if dangerous_error:
+            await self.ctx.send.text(dangerous_error, stream_id)
+            return False, dangerous_error
+        parts = arg.strip().split(maxsplit=1)
+        if len(parts) < 2:
+            await self.ctx.send.text("用法：/codex resume <task_id|session名|thread_id> <继续处理的要求>", stream_id)
+            return False, "resume 参数不足"
+
+        target, prompt = parts[0], parts[1].strip()
+        record = self._resolve_resume_record(target)
+        thread_id = str((record or {}).get("codex_thread_id") or "").strip()
+        if not thread_id and self._looks_like_thread_id(target):
+            thread_id = target
+        if not thread_id:
+            await self.ctx.send.text(f"未找到可恢复的 Codex thread：{target}", stream_id)
+            return False, "未找到 thread"
+
+        session_name = str((record or {}).get("session_name") or "")
+        record_type = "session" if session_name else "task"
+        result = await self._create_local_task(
+            prompt=prompt,
+            raw_command=f"/codex resume {arg}",
+            stream_id=stream_id,
+            platform=platform,
+            user_id=user_id,
+            group_id=group_id,
+            record_type=record_type,
+            session_name=session_name,
+            resume_thread_id=thread_id,
+            parent_task_id=str((record or {}).get("latest_task_id") or (record or {}).get("task_id") or ""),
+        )
+        return result[0], result[1]
+
     def _get_execution_mode(self) -> str:
         """返回规范化执行模式。"""
 
         return str(self.config.task.execution_mode or "local").strip().lower()
+
+    def _list_codex_skills(self) -> List[Dict[str, str]]:
+        """扫描 CODEX_HOME 下的 skills。"""
+
+        skills_root = self._codex_home() / "skills"
+        if not skills_root.exists() or not skills_root.is_dir():
+            return []
+
+        skills: List[Dict[str, str]] = []
+        for skill_file in sorted(skills_root.glob("**/SKILL.md")):
+            parsed = self._parse_skill_file(skill_file)
+            if parsed:
+                skills.append(parsed)
+        skills.sort(key=lambda item: item.get("name", "").lower())
+        return skills
+
+    @staticmethod
+    def _parse_skill_file(skill_file: Path) -> Dict[str, str]:
+        """读取一个 SKILL.md 的名称和描述。"""
+
+        try:
+            text = skill_file.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return {}
+
+        metadata: Dict[str, str] = {}
+        if text.startswith("---"):
+            end_index = text.find("\n---", 3)
+            if end_index != -1:
+                for line in text[3:end_index].splitlines():
+                    if ":" not in line:
+                        continue
+                    key, value = line.split(":", 1)
+                    metadata[key.strip().lower()] = value.strip().strip('"').strip("'")
+
+        name = metadata.get("name") or skill_file.parent.name
+        description = metadata.get("description") or ""
+        return {"name": name, "description": description}
+
+    def _list_codex_mcp_servers(self) -> List[Dict[str, Any]]:
+        """调用 codex mcp list --json 并规整输出。"""
+
+        command = [self.config.local_codex.codex_binary.strip() or "codex", "mcp", "list", "--json"]
+        result = subprocess.run(
+            command,
+            cwd=str(Path.cwd()),
+            env=self._build_local_codex_env(),
+            text=True,
+            capture_output=True,
+            timeout=15,
+            check=False,
+        )
+        if result.returncode != 0:
+            stderr = result.stderr.strip() or result.stdout.strip() or f"退出码 {result.returncode}"
+            raise RuntimeError(_truncate_text(stderr, 500))
+
+        output = result.stdout.strip()
+        if not output:
+            return []
+        data = json.loads(output)
+        if isinstance(data, list):
+            return [self._normalize_mcp_server(item) for item in data if isinstance(item, dict)]
+        if isinstance(data, dict):
+            if isinstance(data.get("servers"), list):
+                return [self._normalize_mcp_server(item) for item in data["servers"] if isinstance(item, dict)]
+            return [self._normalize_mcp_server({"name": name, **value}) for name, value in data.items() if isinstance(value, dict)]
+        return []
+
+    @staticmethod
+    def _normalize_mcp_server(server: Dict[str, Any]) -> Dict[str, Any]:
+        """规整不同版本 codex mcp list 的字段。"""
+
+        normalized = dict(server)
+        name = normalized.get("name") or normalized.get("id") or normalized.get("server")
+        normalized["name"] = str(name or "").strip() or "未命名"
+        if "enabled" not in normalized:
+            normalized["enabled"] = True
+        if "transport" not in normalized:
+            if normalized.get("url"):
+                normalized["transport"] = "http"
+            elif normalized.get("command"):
+                normalized["transport"] = "stdio"
+        return normalized
+
+    def _read_codex_user_config(self) -> Dict[str, Any]:
+        """读取本机 Codex 用户配置。"""
+
+        config_path = self._codex_home() / "config.toml"
+        if not config_path.exists():
+            return {}
+        try:
+            with config_path.open("rb") as file:
+                data = tomllib.load(file)
+        except (OSError, tomllib.TOMLDecodeError):
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    def _list_task_records(self, stream_id: str, scoped_user: str, limit: int = 10) -> List[Dict[str, Any]]:
+        """列出当前用户 task 记录。"""
+
+        records = []
+        for path in self._task_records_dir().glob("*.json"):
+            record = self._read_json_file(path)
+            if not record:
+                continue
+            if str(record.get("stream_id") or "") != stream_id:
+                continue
+            record_user = self._build_scoped_user(str(record.get("platform") or ""), str(record.get("user_id") or ""))
+            if scoped_user and record_user != scoped_user:
+                continue
+            if str(record.get("record_type") or "task") == "session":
+                continue
+            records.append(record)
+        records.sort(key=lambda item: float(item.get("updated_at") or item.get("created_at") or 0), reverse=True)
+        return records[:limit]
+
+    def _list_session_records(self, stream_id: str, scoped_user: str, limit: int = 10) -> List[Dict[str, Any]]:
+        """列出当前用户 session 记录。"""
+
+        records = []
+        for path in self._session_records_dir().glob("*.json"):
+            record = self._read_json_file(path)
+            if not record:
+                continue
+            if str(record.get("stream_id") or "") != stream_id:
+                continue
+            record_user = self._build_scoped_user(str(record.get("platform") or ""), str(record.get("user_id") or ""))
+            if scoped_user and record_user != scoped_user:
+                continue
+            records.append(record)
+        records.sort(key=lambda item: float(item.get("updated_at") or item.get("created_at") or 0), reverse=True)
+        return records[:limit]
+
+    def _resolve_resume_record(self, target: str) -> Optional[Dict[str, Any]]:
+        """按 task_id 或 session 名找到可恢复记录。"""
+
+        if self._looks_like_task_id(target):
+            return self._load_task_record(target)
+        session_record = self._load_session_record(target)
+        if session_record:
+            return session_record
+        return None
+
+    async def _convert_task_to_session(
+        self,
+        task_id: str,
+        session_name: str,
+        stream_id: str,
+        platform: str,
+        user_id: str,
+    ) -> None:
+        """把已有 task 转为 session。"""
+
+        record = self._load_task_record(task_id)
+        if not record:
+            await self.ctx.send.text(f"未找到 task：{task_id}", stream_id)
+            return
+        if str(record.get("stream_id") or "") != stream_id:
+            await self.ctx.send.text("不能把其他聊天流的 task 转为 session。", stream_id)
+            return
+        scoped_user = self._build_scoped_user(platform, user_id)
+        record_user = self._build_scoped_user(str(record.get("platform") or ""), str(record.get("user_id") or ""))
+        if scoped_user and record_user != scoped_user:
+            await self.ctx.send.text("不能把其他用户的 task 转为 session。", stream_id)
+            return
+        if not str(record.get("codex_thread_id") or "").strip():
+            await self.ctx.send.text("这个 task 缺少 Codex thread_id，不能转为 session。", stream_id)
+            return
+        name = self._safe_record_name(session_name or task_id)
+        if self._load_session_record(name):
+            await self.ctx.send.text(f"session 已存在：{name}", stream_id)
+            return
+        record["record_type"] = "session"
+        record["session_name"] = name
+        record["latest_task_id"] = task_id
+        self._write_session_record(record)
+        await self.ctx.send.text(f"已将 task 转为 session：{name}\n继续：/codex continue <要求>", stream_id)
+
+    @staticmethod
+    def _looks_like_task_id(value: str) -> bool:
+        """判断是否像插件 task_id。"""
+
+        return bool(re.match(r"^(?:local|remote)_\d{8}_\d{6}_[0-9a-fA-F]+$", str(value or "").strip()))
+
+    @staticmethod
+    def _looks_like_thread_id(value: str) -> bool:
+        """判断是否像 Codex thread/session id。"""
+
+        text = str(value or "").strip()
+        return bool(re.match(r"^[0-9a-fA-F]{8}-[0-9a-fA-F-]{13,}$", text) or text.startswith("019"))
+
+    @staticmethod
+    def _codex_home() -> Path:
+        """返回 Codex 本地状态目录。"""
+
+        return Path(os.environ.get("CODEX_HOME") or "~/.codex").expanduser()
 
     @staticmethod
     def _build_help_text(prefix: str) -> str:
@@ -1888,10 +2642,18 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
         escaped_prefix = prefix or "/codex"
         return (
             "远程 Codex Agent 命令：\n"
-            f"{escaped_prefix} <任务描述> 创建远程 Codex 任务\n"
+            f"{escaped_prefix} <任务描述> 创建一次性 task\n"
+            f"{escaped_prefix} session <会话名> <任务描述> 创建持久 session\n"
+            f"{escaped_prefix} session <task_id> confirm [会话名] 将 task 转为 session\n"
+            f"{escaped_prefix} continue <要求> 继续当前用户最近 session\n"
+            f"{escaped_prefix} resume <task_id|session名|thread_id> <要求> 恢复指定对话\n"
+            f"{escaped_prefix} list 查看当前用户记录\n"
             f"{escaped_prefix} status 查看当前聊天流任务\n"
             f"{escaped_prefix} status <task_id> 查看指定任务\n"
             f"{escaped_prefix} cancel <task_id> 取消指定任务\n"
+            f"{escaped_prefix} skills 查看可用 Codex skills\n"
+            f"{escaped_prefix} mcp 查看当前 Codex MCP 服务器\n"
+            f"{escaped_prefix} config 查看当前模型和运行配置\n"
             f"{escaped_prefix} help 查看帮助\n"
             "示例：\n"
             f"{escaped_prefix} 搜索某主题并生成一份 Word 文档，完成后返回下载链接"

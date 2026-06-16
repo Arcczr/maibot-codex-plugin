@@ -39,6 +39,9 @@ allow_all_users = true
 # 允许触发的用户。推荐写成 "qq:用户ID"；也兼容只写用户 ID。
 allowed_users = []
 
+# 管理员用户。允许使用 danger-full-access 等高危配置。
+admin_users = []
+
 # 允许触发的群或聊天流。可写群号、"qq:群号" 或 stream_id。空列表表示不限制聊天流。
 allowed_groups = []
 
@@ -66,6 +69,12 @@ poll_interval_seconds = 5.0
 
 # 单个任务最长跟踪时间，单位秒。远程任务可能继续运行，但插件会停止转发。
 max_watch_seconds = 3600.0
+
+# 普通 task 可通过 resume 继续的保留时间，单位小时。只清理插件记录，不删除产物目录。
+resumable_task_ttl_hours = 24.0
+
+# 把普通 task 转为 session 时是否要求二次确认。
+require_session_confirm = true
 
 [local_codex]
 # Codex CLI 可执行文件名或绝对路径。

@@ -49,7 +49,17 @@ codex -a never exec --json --color never -s workspace-write --skip-git-repo-chec
 /codex status
 /codex status <task_id>
 /codex cancel <task_id>
+/codex skills
+/codex mcp
+/codex config
+/codex list
+/codex session <会话名> <任务描述>
+/codex session <task_id> confirm [会话名]
+/codex continue <继续处理的要求>
+/codex resume <task_id|session名|thread_id> <继续处理的要求>
 ```
+
+默认 `/codex <任务描述>` 创建一次性 task。task 会在 `task.resumable_task_ttl_hours` 时间内保留可恢复记录；重启时插件会清理过期 task 记录，但不会删除任务产物目录。需要长期连续对话时使用 session。
 
 ## 本机执行流程
 
