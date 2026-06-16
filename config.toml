@@ -2,7 +2,7 @@
 
 [plugin]
 # 配置文件版本
-config_version = "0.2.1"
+config_version = "0.3.0"
 
 # 是否启用插件。触发权限仍由 permission.allowed_users / allow_all_users 控制。
 enabled = true
@@ -34,7 +34,7 @@ verify_tls = true
 
 [permission]
 # 是否允许所有用户触发。建议保持 false，并配置 allowed_users。
-allow_all_users = false
+allow_all_users = true
 
 # 允许触发的用户。推荐写成 "qq:用户ID"；也兼容只写用户 ID。
 allowed_users = []
@@ -94,6 +94,7 @@ process_timeout_seconds = 3600.0
 
 # 产物匹配规则，会在任务 workspace 下扫描。
 artifact_globs = ["artifacts/*", "*.docx", "*.pdf", "*.md", "*.zip", "*.xlsx", "*.pptx"]
+env_file = "plugins/remote_codex_agent/.env.local"
 
 [progress]
 # 是否把运行进度转发到 QQ
@@ -125,7 +126,7 @@ custom_file_message_type = "file"
 [napcat]
 # 是否启用 NapCat HTTP API 直接上传产物文件。
 # 需要在 NapCat WebUI 中为本 bot 新建 HTTP 服务器。
-enabled = false
+enabled = true
 
 # NapCat HTTP Server 协议：http 或 https。
 scheme = "http"
@@ -147,3 +148,23 @@ upload_file = true
 
 # 单个产物最大上传大小，单位 MB。0 表示不限制。
 max_file_size_mb = 100.0
+
+[input_file]
+# 是否允许用户回复 QQ 文件消息后，用 /codex 把该文件作为输入材料。
+enable_reply_file = true
+
+# 输入材料放入 Codex workspace 下的目录名。
+input_dir_name = "input"
+
+# 单个任务最多导入多少个被回复文件。
+max_files_per_task = 5
+
+# 单个输入文件最大大小，单位 MB。0 表示不限制。
+max_file_size_mb = 100.0
+
+# 是否允许从文件消息中的 HTTP URL 下载材料。
+allow_url_download = true
+
+# 允许复制的本地文件根目录。空列表表示不限制。
+# 如果 NapCat 和 MaiBot 同机裸机部署，可保持空列表。
+allowed_local_roots = []

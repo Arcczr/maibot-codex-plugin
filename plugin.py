@@ -8,6 +8,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 import os
 from pathlib import Path
+import re
+import shutil
 from typing import Any, ClassVar, Dict, List, Optional
 from uuid import uuid4
 from maibot_sdk import Command, Field, MaiBotPlugin, PluginConfigBase
@@ -41,7 +43,7 @@ class PluginSectionConfig(PluginConfigBase):
     __ui_icon__: ClassVar[str] = "bot"
     __ui_order__: ClassVar[int] = 0
 
-    config_version: str = Field(default="0.2.1", description="配置版本号")
+    config_version: str = Field(default="0.3.0", description="配置版本号")
     enabled: bool = Field(default=True, description="是否启用插件")
 
 
@@ -156,6 +158,21 @@ class NapCatConfig(PluginConfigBase):
     max_file_size_mb: float = Field(default=100.0, description="单个产物最大上传大小，0 表示不限制")
 
 
+class InputFileConfig(PluginConfigBase):
+    """用户输入文件配置。"""
+
+    __ui_label__: ClassVar[str] = "输入文件"
+    __ui_icon__: ClassVar[str] = "paperclip"
+    __ui_order__: ClassVar[int] = 8
+
+    enable_reply_file: bool = Field(default=True, description="是否允许回复 QQ 文件消息创建带材料的 Codex 任务")
+    input_dir_name: str = Field(default="input", description="输入材料放入 workspace 下的目录名")
+    max_files_per_task: int = Field(default=5, description="单个任务最多导入多少个文件")
+    max_file_size_mb: float = Field(default=100.0, description="单个输入文件最大大小，0 表示不限制")
+    allow_url_download: bool = Field(default=True, description="是否允许从 QQ 文件消息中的 HTTP URL 下载输入文件")
+    allowed_local_roots: List[str] = Field(default_factory=list, description="允许复制的本地文件根目录，空列表表示不限制")
+
+
 class RemoteCodexAgentConfig(PluginConfigBase):
     """远程 Codex Agent 插件配置。"""
 
@@ -167,6 +184,17 @@ class RemoteCodexAgentConfig(PluginConfigBase):
     progress: ProgressConfig = Field(default_factory=ProgressConfig, description="进度转发配置")
     artifact: ArtifactConfig = Field(default_factory=ArtifactConfig, description="产物回传配置")
     napcat: NapCatConfig = Field(default_factory=NapCatConfig, description="NapCat 直连配置")
+    input_file: InputFileConfig = Field(default_factory=InputFileConfig, description="输入文件配置")
+
+
+@dataclass
+class InputFile:
+    """导入到 Codex workspace 的用户材料文件。"""
+
+    name: str
+    path: str
+    size: int = 0
+    source: str = ""
 
 
 @dataclass
@@ -188,6 +216,7 @@ class RemoteTaskState:
     process: Optional[asyncio.subprocess.Process] = None
     workspace_dir: str = ""
     final_message_path: str = ""
+    input_files: List[InputFile] = field(default_factory=list)
 
 
 class RemoteAgentClient:
@@ -396,6 +425,21 @@ class NapCatUploadClient:
         if isinstance(size, (int, float)) and size > max_file_size_mb * 1024 * 1024:
             raise ValueError(f"产物超过 napcat.max_file_size_mb 限制：{size:.0f} bytes")
 
+    async def call_action(self, action: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """调用一个 NapCat HTTP action。"""
+
+        response = await self._get_client().post(self._build_url(action), headers=self._headers(), json=payload)
+        response.raise_for_status()
+        data = response.json()
+        if not isinstance(data, dict):
+            raise ValueError(f"NapCat {action} 响应不是 JSON 对象")
+        status = data.get("status")
+        retcode = data.get("retcode")
+        if (status is not None and status != "ok") or (retcode is not None and retcode != 0):
+            message = data.get("message") or data.get("wording") or data
+            raise RuntimeError(f"NapCat {action} 失败：{message}")
+        return data
+
 
 def _normalize_set(values: List[str]) -> set[str]:
     """规范化字符串列表为集合。"""
@@ -453,6 +497,19 @@ def _format_progress_message(task_id: str, progress_lines: List[str], max_chars:
         "\n"
         f"{body}"
     )
+
+
+def _looks_like_final_progress(text: str) -> bool:
+    """判断 Codex 流式输出是否已经是最终总结。"""
+
+    cleaned = _plain_qq_text(text)
+    if not cleaned:
+        return False
+    markers = ("产物路径", "产物：", "产物:", "artifact", "artifacts/")
+    if not any(marker.lower() in cleaned.lower() for marker in markers):
+        return False
+    final_markers = ("已完成", "已生成", "已读取", "已整理", "生成结果", "完成")
+    return any(marker in cleaned for marker in final_markers)
 
 
 def _display_task_kind(task_id: str) -> str:
@@ -548,7 +605,7 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
     @Command(
         "remote_codex_agent",
         description="触发远程 Ubuntu Codex CLI 任务",
-        pattern=r"^\s*(?:@<[^>]+>\s*)*(?P<agent_command>/(?:codex|agent)(?:\s+[\s\S]*)?)$",
+        pattern=r"^\s*(?:\[回复<[^>]+>：[\s\S]*?\]，说：\s*)?(?:@<[^>]+>\s*)*(?P<agent_command>/(?:codex|agent)(?:\s+[\s\S]*)?)$",
     )
     async def handle_codex_command(
         self,
@@ -617,6 +674,7 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
                 platform=platform,
                 user_id=user_id,
                 group_id=group_id,
+                command_message=kwargs.get("message"),
             )
 
         return await self._create_remote_task(
@@ -635,7 +693,11 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
             command = str(matched_groups.get("agent_command") or "").strip()
             if command:
                 return command
-        return str(kwargs.get("text") or "").strip()
+        text = str(kwargs.get("text") or kwargs.get("raw_message") or "").strip()
+        match = re.search(r"(?<!\S)/(?:codex|agent)(?:\s+[\s\S]*)?$", text, flags=re.IGNORECASE)
+        if match:
+            return match.group(0).strip()
+        return text
 
     @staticmethod
     def _extract_command_prefix(raw_command: str) -> str:
@@ -767,6 +829,7 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
         platform: str,
         user_id: str,
         group_id: str,
+        command_message: Any = None,
     ) -> tuple[bool, str, bool]:
         """创建本机 Codex CLI 任务。"""
 
@@ -774,6 +837,8 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
         task_id = f"local_{time.strftime('%Y%m%d_%H%M%S')}_{uuid4().hex[:8]}"
         try:
             task_dir, workspace_dir, prompt_path, final_message_path = self._prepare_local_task_files(task_id, prompt)
+            input_files = await self._prepare_reply_input_files(command_message, stream_id, workspace_dir)
+            prompt_path.write_text(self._build_local_codex_prompt(prompt, input_files), encoding="utf-8")
         except Exception as exc:
             message = f"创建本地 Codex 任务目录失败：{exc}"
             await self.ctx.send.text(message, stream_id)
@@ -789,13 +854,20 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
             last_status="queued",
             workspace_dir=str(workspace_dir),
             final_message_path=str(final_message_path),
+            input_files=input_files,
         )
         self._tasks[task_id] = task_state
         task_state.watch_task = asyncio.create_task(
             self._run_local_codex_task(task_state, task_dir, workspace_dir, prompt_path, final_message_path),
             name=f"local_codex:{task_id}",
         )
-        await self.ctx.send.text(f"本机 Codex 任务已创建：{task_id}", stream_id)
+        created_message = f"本机 Codex 任务已创建：{task_id}"
+        if input_files:
+            names = "、".join(item.name for item in input_files[:3])
+            if len(input_files) > 3:
+                names = f"{names} 等 {len(input_files)} 个文件"
+            created_message = f"{created_message}\n已导入参考文件：{names}"
+        await self.ctx.send.text(created_message, stream_id)
         return True, f"本机任务已创建: {task_id}", True
 
     def _prepare_local_task_files(self, task_id: str, prompt: str) -> tuple[Path, Path, Path, Path]:
@@ -808,11 +880,25 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
         workspace_dir.mkdir(parents=True, exist_ok=False)
         prompt_path = task_dir / "prompt.md"
         final_message_path = task_dir / "final.md"
-        prompt_path.write_text(self._build_local_codex_prompt(prompt), encoding="utf-8")
+        prompt_path.write_text(self._build_local_codex_prompt(prompt, []), encoding="utf-8")
         return task_dir, workspace_dir, prompt_path, final_message_path
 
-    def _build_local_codex_prompt(self, prompt: str) -> str:
+    def _build_local_codex_prompt(self, prompt: str, input_files: List[InputFile]) -> str:
         """构造发给本机 Codex CLI 的 prompt。"""
+
+        input_text = ""
+        if input_files:
+            input_dir_name = self._safe_dir_name(self.config.input_file.input_dir_name or "input")
+            lines = [
+                f"用户上传的参考文件已经放在当前 workspace/{input_dir_name}/ 目录下。",
+                f"请优先读取这些文件并按用户任务处理；不要把 {input_dir_name}/ 中的原始材料当作最终产物回传。",
+                "输入文件：",
+            ]
+            for item in input_files:
+                rel_path = Path(item.path).name
+                size_text = f"，大小 {self._format_size(item.size)}" if item.size > 0 else ""
+                lines.append(f"- {input_dir_name}/{rel_path}{size_text}")
+            input_text = "\n".join(lines) + "\n\n"
 
         return (
             "你正在由 QQ 群中的 MaiBot 插件触发执行任务。\n"
@@ -820,8 +906,408 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
             "如果用户要求 Word/word/docx 文档，必须生成 .docx 文件，不能只生成 Markdown 或纯文本替代品。\n"
             "所有面向用户的进度更新和最终回答都必须使用简体中文，语气简洁，不要输出 Markdown 格式。\n"
             "最终回答请用简体中文，简要说明完成内容和产物路径。\n\n"
+            f"{input_text}"
             f"用户任务：\n{prompt.strip()}\n"
         )
+
+    async def _prepare_reply_input_files(
+        self,
+        command_message: Any,
+        stream_id: str,
+        workspace_dir: Path,
+        group_id: str = "",
+        user_id: str = "",
+    ) -> List[InputFile]:
+        """从被回复的 QQ 文件消息中导入输入材料。"""
+
+        if not self.config.input_file.enable_reply_file:
+            return []
+
+        reply_message_id = self._extract_reply_message_id(command_message)
+        if not reply_message_id:
+            return []
+
+        try:
+            reply_message = await self.ctx.message.get_by_id(reply_message_id, stream_id=stream_id)
+        except Exception as exc:
+            raise RuntimeError(f"无法读取被回复的消息：{exc}") from exc
+
+        file_segments = self._extract_file_segments(reply_message)
+        if not file_segments:
+            napcat_message = await self._get_napcat_message(reply_message_id)
+            file_segments = self._extract_file_segments(napcat_message)
+        if not file_segments:
+            raise RuntimeError("被回复的消息里没有可用文件。请回复 QQ 文件消息后再发送 /codex。")
+
+        input_dir_name = self._safe_dir_name(self.config.input_file.input_dir_name or "input")
+        input_dir = workspace_dir / input_dir_name
+        input_dir.mkdir(parents=True, exist_ok=True)
+
+        imported_files: List[InputFile] = []
+        max_files = max(int(self.config.input_file.max_files_per_task), 1)
+        for segment in file_segments[:max_files]:
+            imported_files.append(await self._import_input_file_segment(segment, input_dir, group_id=group_id, user_id=user_id))
+        return imported_files
+
+    async def _get_napcat_message(self, message_id: str) -> Any:
+        """通过 NapCat get_msg 获取原始 QQ 消息。"""
+
+        if not str(message_id or "").strip():
+            return None
+        try:
+            response = await self._napcat_client.call_action("get_msg", {"message_id": message_id})
+        except Exception as exc:
+            self.ctx.logger.warning("NapCat get_msg 获取被回复消息失败: %s", exc)
+            return None
+        return response.get("data") if isinstance(response, dict) else response
+
+    def _extract_reply_message_id(self, message: Any) -> str:
+        """从命令消息中提取被回复消息 ID。"""
+
+        for value in self._walk_message_values(message):
+            if isinstance(value, dict):
+                message_type = str(value.get("type") or value.get("msg_type") or "").strip().lower()
+                data = value.get("data")
+                if message_type == "reply" and isinstance(data, dict):
+                    reply_id = self._first_text_value(data, ["id", "message_id", "msg_id", "reply_id"])
+                    if reply_id:
+                        return reply_id
+                reply_id = self._first_text_value(
+                    value,
+                    [
+                        "reply_message_id",
+                        "reply_to_message_id",
+                        "source_message_id",
+                        "quoted_message_id",
+                        "quote_message_id",
+                        "reply_id",
+                    ],
+                )
+                if reply_id:
+                    return reply_id
+            else:
+                reply_id = self._first_attr_value(
+                    value,
+                    [
+                        "reply_message_id",
+                        "reply_to_message_id",
+                        "source_message_id",
+                        "quoted_message_id",
+                        "quote_message_id",
+                        "reply_id",
+                    ],
+                )
+                if reply_id:
+                    return reply_id
+        return ""
+
+    def _extract_file_segments(self, message: Any) -> List[Dict[str, Any]]:
+        """从消息对象中提取 file 段。"""
+
+        segments: List[Dict[str, Any]] = []
+        seen_keys: set[str] = set()
+        for value in self._walk_message_values(message):
+            if not isinstance(value, dict):
+                continue
+            segment_type = str(value.get("type") or value.get("msg_type") or value.get("message_type") or "").strip().lower()
+            data = value.get("data")
+            if segment_type == "file":
+                if isinstance(data, dict):
+                    segment = dict(data)
+                else:
+                    segment = {key: val for key, val in value.items() if key not in {"type", "msg_type", "message_type"}}
+                key = self._file_segment_key(segment)
+                if key not in seen_keys:
+                    seen_keys.add(key)
+                    segments.append(segment)
+                continue
+            if any(key in value for key in ("file", "file_id", "fileId", "url", "path")):
+                name = str(value.get("name") or value.get("file_name") or value.get("filename") or "").strip().lower()
+                file_value = str(value.get("file") or value.get("path") or value.get("url") or value.get("file_id") or value.get("fileId") or "").strip()
+                has_file_identity = any(str(value.get(key) or "").strip() for key in ("file", "path", "file_id", "fileId"))
+                if file_value and (segment_type == "file" or name or has_file_identity):
+                    segment = dict(value)
+                    key = self._file_segment_key(segment)
+                    if key not in seen_keys:
+                        seen_keys.add(key)
+                        segments.append(segment)
+        return segments
+
+    @staticmethod
+    def _file_segment_key(segment: Dict[str, Any]) -> str:
+        """生成文件段去重 key。"""
+
+        return "|".join(
+            str(segment.get(key) or "").strip()
+            for key in ("file_id", "fileId", "file", "path", "url", "name", "filename", "file_name")
+        )
+
+    async def _import_input_file_segment(
+        self,
+        segment: Dict[str, Any],
+        input_dir: Path,
+        group_id: str = "",
+        user_id: str = "",
+    ) -> InputFile:
+        """把单个 QQ 文件段导入 input 目录。"""
+
+        resolved = await self._resolve_input_file_segment(segment, group_id=group_id, user_id=user_id)
+        file_ref = self._select_input_file_ref(resolved)
+        name = self._guess_input_filename(resolved, file_ref)
+        if not file_ref:
+            raise RuntimeError(f"文件 {name} 缺少可下载地址或本地路径")
+
+        target_path = self._dedupe_path(input_dir / self._safe_filename(name))
+        if file_ref.lower().startswith(("http://", "https://")):
+            if not self.config.input_file.allow_url_download:
+                raise RuntimeError(f"输入文件 {name} 是 URL，但 input_file.allow_url_download 未启用")
+            await self._download_input_file(file_ref, target_path)
+        else:
+            source_path = self._normalize_local_file_path(file_ref)
+            self._check_allowed_input_source(source_path)
+            if not source_path.exists() or not source_path.is_file():
+                raise RuntimeError(f"输入文件不存在或不可读：{source_path}")
+            self._check_input_file_size(source_path.stat().st_size, source_path.name)
+            shutil.copy2(source_path, target_path)
+
+        size = target_path.stat().st_size
+        self._check_input_file_size(size, target_path.name)
+        return InputFile(name=target_path.name, path=str(target_path.resolve()), size=size, source=file_ref)
+
+    async def _resolve_input_file_segment(
+        self,
+        segment: Dict[str, Any],
+        group_id: str = "",
+        user_id: str = "",
+    ) -> Dict[str, Any]:
+        """通过 NapCat 补全 file_id 对应的文件信息。"""
+
+        data = dict(segment)
+        if self._select_input_file_ref(data):
+            return data
+
+        file_id = str(data.get("file_id") or data.get("fileId") or data.get("id") or "").strip()
+        if not file_id:
+            return data
+
+        try:
+            response = await self._napcat_client.call_action("get_file", {"file_id": file_id})
+        except Exception as exc:
+            self.ctx.logger.warning("NapCat get_file 获取输入文件失败: %s", exc)
+        else:
+            response_data = response.get("data")
+            if isinstance(response_data, dict):
+                merged = dict(data)
+                merged.update(response_data)
+                if self._select_input_file_ref(merged):
+                    return merged
+                data = merged
+
+        url_data = await self._resolve_input_file_url(data, file_id=file_id, group_id=group_id, user_id=user_id)
+        if url_data:
+            merged = dict(data)
+            merged.update(url_data)
+            return merged
+        return data
+
+    async def _resolve_input_file_url(
+        self,
+        data: Dict[str, Any],
+        file_id: str,
+        group_id: str = "",
+        user_id: str = "",
+    ) -> Dict[str, Any]:
+        """通过 NapCat 文件 URL action 补全下载地址。"""
+
+        busid = str(data.get("busid") or data.get("bus_id") or "").strip()
+        candidates: List[tuple[str, Dict[str, Any]]] = []
+        if group_id:
+            payload: Dict[str, Any] = {"group_id": group_id, "file_id": file_id}
+            if busid:
+                payload["busid"] = busid
+            candidates.append(("get_group_file_url", payload))
+        if user_id:
+            candidates.append(("get_private_file_url", {"user_id": user_id, "file_id": file_id}))
+
+        for action, payload in candidates:
+            try:
+                response = await self._napcat_client.call_action(action, payload)
+            except Exception as exc:
+                self.ctx.logger.warning("NapCat %s 获取输入文件 URL 失败: %s", action, exc)
+                continue
+            response_data = response.get("data")
+            if isinstance(response_data, dict):
+                return response_data
+        return {}
+
+    @staticmethod
+    def _select_input_file_ref(data: Dict[str, Any]) -> str:
+        """从文件段中选择真实可读取的路径或 URL。"""
+
+        for key in ("path", "url", "download_url"):
+            value = str(data.get(key) or "").strip()
+            if value:
+                return value
+
+        file_value = str(data.get("file") or "").strip()
+        if not file_value:
+            return ""
+        lowered = file_value.lower()
+        if lowered.startswith(("http://", "https://", "file://", "base64:", "data:")):
+            return file_value
+        path = Path(file_value).expanduser()
+        if path.is_absolute() or "/" in file_value or "\\" in file_value or path.exists():
+            return file_value
+        return ""
+
+    async def _download_input_file(self, url: str, target_path: Path) -> None:
+        """下载输入文件到目标路径。"""
+
+        timeout = max(float(self.config.napcat.request_timeout_seconds), 1.0)
+        headers = {}
+        token = str(self.config.napcat.token or "").strip()
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+            async with client.stream("GET", url, headers=headers) as response:
+                response.raise_for_status()
+                total = 0
+                with target_path.open("wb") as file:
+                    async for chunk in response.aiter_bytes():
+                        if not chunk:
+                            continue
+                        total += len(chunk)
+                        self._check_input_file_size(total, target_path.name)
+                        file.write(chunk)
+
+    def _check_allowed_input_source(self, source_path: Path) -> None:
+        """检查本地输入文件是否在允许根目录内。"""
+
+        roots = [str(root or "").strip() for root in self.config.input_file.allowed_local_roots if str(root or "").strip()]
+        if not roots:
+            return
+
+        resolved_source = source_path.resolve()
+        for root in roots:
+            resolved_root = Path(root).expanduser().resolve()
+            try:
+                resolved_source.relative_to(resolved_root)
+                return
+            except ValueError:
+                continue
+        raise RuntimeError(f"输入文件路径不在允许目录内：{source_path}")
+
+    def _check_input_file_size(self, size_bytes: int, name: str) -> None:
+        """检查输入文件大小。"""
+
+        max_file_size_mb = float(self.config.input_file.max_file_size_mb)
+        if max_file_size_mb <= 0:
+            return
+        if size_bytes > max_file_size_mb * 1024 * 1024:
+            raise RuntimeError(f"输入文件 {name} 超过 {max_file_size_mb:g}MB 限制")
+
+    @staticmethod
+    def _normalize_local_file_path(file_ref: str) -> Path:
+        """把 NapCat 文件引用规范化为本地路径。"""
+
+        value = str(file_ref or "").strip()
+        if value.lower().startswith("file://"):
+            value = value[7:]
+        return Path(value).expanduser()
+
+    @staticmethod
+    def _guess_input_filename(data: Dict[str, Any], file_ref: str) -> str:
+        """推断输入文件名。"""
+
+        for key in ("name", "filename", "file_name"):
+            value = str(data.get(key) or "").strip()
+            if value:
+                return value
+        ref = str(file_ref or "").strip()
+        if ref.lower().startswith(("http://", "https://")):
+            return Path(httpx.URL(ref).path).name or "input_file"
+        return Path(ref).name or "input_file"
+
+    @staticmethod
+    def _safe_filename(name: str) -> str:
+        """生成适合落盘的文件名。"""
+
+        cleaned = re.sub(r"[\\/:*?\"<>|\r\n]+", "_", str(name or "").strip()).strip(" .")
+        return cleaned[:160] or "input_file"
+
+    @staticmethod
+    def _safe_dir_name(name: str) -> str:
+        """生成安全目录名。"""
+
+        cleaned = re.sub(r"[\\/:*?\"<>|\r\n]+", "_", str(name or "").strip()).strip(" .")
+        return cleaned[:80] or "input"
+
+    @staticmethod
+    def _dedupe_path(path: Path) -> Path:
+        """避免输入文件重名覆盖。"""
+
+        if not path.exists():
+            return path
+        stem = path.stem or "input_file"
+        suffix = path.suffix
+        for index in range(2, 1000):
+            candidate = path.with_name(f"{stem}_{index}{suffix}")
+            if not candidate.exists():
+                return candidate
+        raise RuntimeError(f"无法为输入文件生成唯一文件名：{path.name}")
+
+    @staticmethod
+    def _first_text_value(data: Dict[str, Any], keys: List[str]) -> str:
+        """按候选 key 取第一个非空字符串。"""
+
+        for key in keys:
+            value = data.get(key)
+            if value is None:
+                continue
+            text = str(value).strip()
+            if text:
+                return text
+        return ""
+
+    @staticmethod
+    def _first_attr_value(value: Any, keys: List[str]) -> str:
+        """按候选属性名取第一个非空字符串。"""
+
+        for key in keys:
+            if not hasattr(value, key):
+                continue
+            attr_value = getattr(value, key)
+            if attr_value is None:
+                continue
+            text = str(attr_value).strip()
+            if text:
+                return text
+        return ""
+
+    def _walk_message_values(self, value: Any, depth: int = 0) -> List[Any]:
+        """遍历消息对象中的 dict、list 和常见对象字段。"""
+
+        if depth > 8 or value is None:
+            return []
+
+        values = [value]
+        if isinstance(value, dict):
+            for child in value.values():
+                values.extend(self._walk_message_values(child, depth + 1))
+            return values
+
+        if isinstance(value, (list, tuple)):
+            for child in value:
+                values.extend(self._walk_message_values(child, depth + 1))
+            return values
+
+        for attr in ("raw_message", "message", "message_chain", "segments", "data"):
+            if hasattr(value, attr):
+                try:
+                    values.extend(self._walk_message_values(getattr(value, attr), depth + 1))
+                except Exception:
+                    continue
+        return values
 
     async def _watch_remote_task(self, task_state: RemoteTaskState) -> None:
         """轮询远程任务状态并转发进度。"""
@@ -1081,6 +1567,8 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
         noisy_prefixes = ("{\"", "[debug]", "debug:", "trace:")
         if cleaned.lower().startswith(noisy_prefixes):
             return ""
+        if _looks_like_final_progress(cleaned):
+            return ""
         return cleaned
 
     async def _send_local_progress(self, task_state: RemoteTaskState, progress_text: str) -> None:
@@ -1295,19 +1783,33 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
         """通过 NapCat HTTP API 直传产物文件。"""
 
         failures: List[str] = []
+        uncertain_failures: List[str] = []
         for artifact in artifacts:
             name = str(artifact.get("name") or artifact.get("filename") or "未命名产物").strip()
             try:
                 await self._napcat_client.upload_artifact(task_state, artifact)
             except Exception as exc:
                 self.ctx.logger.warning("NapCat 文件直传失败: %s", exc)
-                failures.append(f"- {name}: {exc}")
+                failure_line = f"- {name}: {exc}"
+                if self._is_uncertain_napcat_upload_failure(exc):
+                    uncertain_failures.append(failure_line)
+                else:
+                    failures.append(failure_line)
 
         if failures:
             await self.ctx.send.text(
                 "NapCat 文件直传失败：\n" + "\n".join(failures[:5]),
                 task_state.stream_id,
             )
+        elif uncertain_failures:
+            self.ctx.logger.warning("NapCat 文件直传返回超时，可能已发送成功: %s", "; ".join(uncertain_failures[:5]))
+
+    @staticmethod
+    def _is_uncertain_napcat_upload_failure(exc: Exception) -> bool:
+        """NapCat sendMsg 超时可能已经把文件发出，避免在群里误报失败。"""
+
+        message = str(exc).lower()
+        return "timeout" in message and ("sendmsg" in message or "ntevent" in message)
 
     async def _handle_status(self, stream_id: str, task_id: str) -> None:
         """处理任务状态查询命令。"""

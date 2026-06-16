@@ -32,6 +32,14 @@ codex -a never exec --json --color never -s workspace-write --skip-git-repo-chec
 /codex 帮我搜索某个主题，整理成一份 Word 文档，并把产物放到 artifacts 目录
 ```
 
+也可以先在 QQ 上传文件，然后回复这条文件消息发送：
+
+```text
+/codex 阅读这个文档并总结，生成一份 Word 报告
+```
+
+插件会把被回复文件导入本次任务的 `workspace/input/` 目录，并在 prompt 中提示 Codex 优先读取这些材料。
+
 插件命令组件固定支持 `/codex` 和 `/agent` 两个前缀；`config.toml` 中的 `task.command_prefix` 只影响帮助文本默认展示。
 
 辅助命令：
@@ -49,6 +57,7 @@ codex -a never exec --json --color never -s workspace-write --skip-git-repo-chec
 QQ 群触发
  -> 插件回复任务已创建
  -> 插件创建 data/remote_codex_agent/tasks/<task_id>/
+ -> 如果命令回复了 QQ 文件消息，插件把文件导入 workspace/input/
  -> 插件写入 prompt.md
  -> 插件启动 codex exec --json
  -> 插件读取 stdout JSONL 并节流转发进度
@@ -114,6 +123,46 @@ token = ""
 - 私聊：`upload_private_file`
 
 因为 Codex CLI、MaiBot 和 NapCat 在同一台服务器上，插件会把产物的服务器绝对路径直接交给 NapCat，不需要公网下载链接。
+
+## 回复文件作为任务材料
+
+推荐交互：
+
+```text
+用户上传 report.docx
+用户回复 report.docx 这条消息：/codex 提取关键结论并生成汇总表
+```
+
+插件处理流程：
+
+```text
+回复文件消息
+ -> 插件读取被回复消息
+ -> 从 file 段提取本地路径、URL 或 file_id
+ -> 必要时通过 NapCat get_file 补全文件信息
+ -> 复制或下载到 workspace/input/
+ -> 启动 Codex CLI
+```
+
+相关配置：
+
+```toml
+[input_file]
+enable_reply_file = true
+input_dir_name = "input"
+max_files_per_task = 5
+max_file_size_mb = 100.0
+allow_url_download = true
+allowed_local_roots = []
+```
+
+说明：
+
+- 只支持“回复文件消息 + /codex 任务描述”的稳定交互。
+- 不会自动猜最近上传的文件，避免拿错别人的材料。
+- 如果 QQ 文件消息里只有 `file_id`，需要配置可访问的 `[napcat]` HTTP Server，让插件调用 `get_file`。
+- 如果返回的是本地路径，MaiBot 进程必须有权限读取该路径。
+- 如果 MaiBot 和 NapCat 分别在不同容器里，需要确保文件路径或共享卷对 MaiBot 可见。
 
 ## 远程模式接口契约
 
@@ -184,4 +233,5 @@ Content-Type: application/json
 - `work_root` 应放在专用目录，不要指向 MaiBot 主仓库根目录。
 - 限制运行时长、输出长度、文件大小。
 - 不要把完整群聊历史默认发给 Codex。
+- 输入文件可能包含隐私或敏感资料，只允许可信用户触发。
 - 如果启用 `remote` 模式，远程服务必须有鉴权，并保持 `server.require_api_token = true`。
