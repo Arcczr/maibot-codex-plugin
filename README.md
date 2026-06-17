@@ -183,9 +183,29 @@ uv run bot.py
 
 ```text
 /codex list
+/codex list all
 ```
 
 会显示当前用户在当前聊天流里最近的 task 和 session 记录。
+`/codex list all` 仅管理员可用，会查看所有聊天流的记录。
+
+### 清理记录和文件
+
+```text
+/codex clean
+/codex clean input
+/codex clean task <task_id>
+/codex clean session <session名>
+/codex clean session <session名> confirm
+```
+
+这些命令仅管理员可用。
+
+- `/codex clean` 清理过期普通 task 记录，并顺带清理过期输入材料。
+- `/codex clean input` 只清理过期输入材料。
+- `/codex clean task <task_id>` 删除指定 task 的记录和本地文件目录。
+- `/codex clean session <session名>` 先显示删除影响，不会立即删除。
+- `/codex clean session <session名> confirm` 确认删除 session 记录和关联 task 文件。
 
 ## Task 和 Session
 
@@ -197,14 +217,18 @@ uv run bot.py
 
 - 适合单次任务。
 - 会保存一段时间，可通过 `resume` 短时间继续。
-- 超过 `task.resumable_task_ttl_hours` 后，插件重启时会清理 task 记录。
-- 清理的是插件记录，不会自动删除已经生成的产物目录。
+- 超过 `task.resumable_task_ttl_hours` 后，插件可在启动时或定时清理时清理 task 记录。
+- 默认只清理插件记录，不删除产物目录；开启 `auto_cleanup_task_workspaces` 后才会一起删除 task workspace。
 
 相关配置：
 
 ```toml
 [task]
 resumable_task_ttl_hours = 24.0
+auto_cleanup_task_records = true
+auto_cleanup_task_workspaces = false
+enable_periodic_cleanup = false
+periodic_cleanup_interval_minutes = 60.0
 ```
 
 ### Session
@@ -240,6 +264,7 @@ session 是持久会话，适合连续多轮处理同一个主题。
 - `continue` 会按用户区分，只继续当前用户最近的 session。
 - `resume` 可以指定具体 task、session 名或 Codex thread_id。
 - session 会保存历史 task 列表，`/codex list` 可以看到这个 session 下最近做过的任务。
+- session 不会自动过期；需要管理员用 `/codex clean session <session名>` 并二次确认删除。
 
 ## 回复文件作为输入材料
 
@@ -270,6 +295,8 @@ enable_reply_file = true
 input_dir_name = "input"
 max_files_per_task = 5
 max_file_size_mb = 100.0
+auto_cleanup_input_files = true
+input_file_ttl_hours = 24.0
 allow_url_download = true
 allowed_local_roots = []
 ```
@@ -280,6 +307,7 @@ allowed_local_roots = []
 - Word、PPT、Excel、PDF、Markdown、TXT、ZIP 等文件都可以作为材料传入，最终能否正确读取取决于 Codex 环境中可用的解析工具。
 - 如果 QQ 文件消息只有 `file_id`，通常需要配置 NapCat HTTP API，让插件调用 `get_file` 获取文件路径或下载地址。
 - 如果 MaiBot 和 NapCat 不在同一个文件系统里，需要用共享卷或 URL 方式让 MaiBot 读到文件。
+- 输入材料会放在 `workspace/input/`，可按 `input_file_ttl_hours` 自动清理；清理输入材料不会删除产物、日志或 task 记录。
 
 ## 产物生成和回传
 
@@ -450,6 +478,18 @@ data/remote_codex_agent/tasks/_records/
 ```
 
 这些运行时目录不应该提交到 Git。
+
+## 运行时清理策略
+
+普通 task、输入材料和 session 的清理策略不同：
+
+- 普通 task 记录可按 `task.resumable_task_ttl_hours` 过期清理。
+- `task.auto_cleanup_task_records = true` 时，插件启动会自动清理过期普通 task 记录。
+- `task.enable_periodic_cleanup = true` 时，长时间不重启 MaiBot 也会按间隔定时清理。
+- `task.auto_cleanup_task_workspaces = false` 是默认值，表示自动清理 task 记录时不删除 workspace 和产物。
+- `input_file.auto_cleanup_input_files = true` 时，过期输入材料会按 `input_file.input_file_ttl_hours` 清理。
+- 输入材料清理只删除 `workspace/input/`，不会删除 `workspace/artifacts/`、日志或 task 记录。
+- session 不自动清理，需要管理员手动 `/codex clean session <session名>` 并按提示确认。
 
 ## 远程模式
 

@@ -96,6 +96,10 @@ class TaskConfig(PluginConfigBase):
     max_watch_seconds: float = Field(default=3600.0, description="单个任务最长跟踪时间")
     resumable_task_ttl_hours: float = Field(default=24.0, description="普通 task 可继续对话的保留小时数")
     require_session_confirm: bool = Field(default=True, description="把 task 转为 session 时是否要求二次确认")
+    auto_cleanup_task_records: bool = Field(default=True, description="启动时是否自动清理过期普通 task 记录")
+    auto_cleanup_task_workspaces: bool = Field(default=False, description="自动清理过期 task 记录时是否同时删除 task 目录和文件")
+    enable_periodic_cleanup: bool = Field(default=False, description="是否启用后台定时清理")
+    periodic_cleanup_interval_minutes: float = Field(default=60.0, description="后台定时清理间隔分钟数")
 
 
 class LocalCodexConfig(PluginConfigBase):
@@ -176,6 +180,8 @@ class InputFileConfig(PluginConfigBase):
     max_file_size_mb: float = Field(default=100.0, description="单个输入文件最大大小，0 表示不限制")
     allow_url_download: bool = Field(default=True, description="是否允许从 QQ 文件消息中的 HTTP URL 下载输入文件")
     allowed_local_roots: List[str] = Field(default_factory=list, description="允许复制的本地文件根目录，空列表表示不限制")
+    auto_cleanup_input_files: bool = Field(default=True, description="启动时是否自动清理过期输入材料")
+    input_file_ttl_hours: float = Field(default=24.0, description="输入材料保留小时数，0 表示不自动清理")
 
 
 class RemoteCodexAgentConfig(PluginConfigBase):
@@ -585,6 +591,7 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
         self._client = RemoteAgentClient(RemoteCodexAgentConfig())
         self._napcat_client = NapCatUploadClient(RemoteCodexAgentConfig())
         self._tasks: Dict[str, RemoteTaskState] = {}
+        self._cleanup_task: Optional[asyncio.Task[None]] = None
 
     async def on_load(self) -> None:
         """插件加载时初始化运行态。"""
@@ -593,10 +600,13 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
         self._napcat_client.update_config(self.config)
         self._ensure_records_dirs()
         self._cleanup_expired_task_records()
+        self._cleanup_expired_input_files()
+        self._restart_periodic_cleanup_task()
 
     async def on_unload(self) -> None:
         """插件卸载时停止本地轮询任务。"""
 
+        cleanup_task = self._stop_periodic_cleanup_task()
         for task_state in list(self._tasks.values()):
             if task_state.watch_task is not None and not task_state.watch_task.done():
                 task_state.watch_task.cancel()
@@ -608,6 +618,8 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
             ],
             return_exceptions=True,
         )
+        if cleanup_task is not None:
+            await asyncio.gather(cleanup_task, return_exceptions=True)
         await self._client.close()
         await self._napcat_client.close()
 
@@ -619,6 +631,47 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
         await self._napcat_client.close()
         self._client.update_config(self.config)
         self._napcat_client.update_config(self.config)
+        self._restart_periodic_cleanup_task()
+
+    def _restart_periodic_cleanup_task(self) -> None:
+        """按配置重启后台定时清理任务。"""
+
+        self._stop_periodic_cleanup_task()
+        if not self.config.task.enable_periodic_cleanup:
+            return
+        self._cleanup_task = asyncio.create_task(self._run_periodic_cleanup(), name="remote_codex_agent:cleanup")
+
+    def _stop_periodic_cleanup_task(self) -> Optional[asyncio.Task[None]]:
+        """停止后台定时清理任务。"""
+
+        cleanup_task = self._cleanup_task
+        if self._cleanup_task is not None and not self._cleanup_task.done():
+            self._cleanup_task.cancel()
+        self._cleanup_task = None
+        return cleanup_task
+
+    async def _run_periodic_cleanup(self) -> None:
+        """定时清理过期 task 记录、workspace 和输入材料。"""
+
+        try:
+            while True:
+                interval_seconds = max(float(self.config.task.periodic_cleanup_interval_minutes), 1.0) * 60.0
+                await asyncio.sleep(interval_seconds)
+                try:
+                    task_result = self._cleanup_expired_task_records()
+                    input_result = self._cleanup_expired_input_files()
+                    if any(task_result.values()) or any(input_result.values()):
+                        self.ctx.logger.info(
+                            "Codex 定时清理完成: task_records=%s, task_workspaces=%s, input_files=%s, input_dirs=%s",
+                            task_result.get("records", 0),
+                            task_result.get("workspaces", 0),
+                            input_result.get("files", 0),
+                            input_result.get("dirs", 0),
+                        )
+                except Exception as exc:
+                    self.ctx.logger.warning("Codex 定时清理失败: %s", exc)
+        except asyncio.CancelledError:
+            return
 
     @Command(
         "remote_codex_agent",
@@ -679,8 +732,12 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
             return True, "已查询 Codex 配置", True
 
         if sub_command in {"list", "列表"}:
-            await self._handle_list(stream_id=stream_id, platform=platform, user_id=user_id)
+            await self._handle_list(stream_id=stream_id, platform=platform, user_id=user_id, arg=sub_arg)
             return True, "已查询 Codex 记录", True
+
+        if sub_command in {"clean", "清理"}:
+            await self._handle_clean(stream_id=stream_id, platform=platform, user_id=user_id, arg=sub_arg)
+            return True, "已处理 Codex 清理命令", True
 
         if sub_command == "session":
             handled, message = await self._handle_session_command(
@@ -1023,6 +1080,11 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
     def _pending_session_dir(self) -> Path:
         return self._records_root() / "pending_sessions"
 
+    def _task_dir_for_id(self, task_id: str) -> Path:
+        """返回本地 task 目录。"""
+
+        return self._local_work_root() / str(task_id or "").strip()
+
     def _ensure_records_dirs(self) -> None:
         """确保记录目录存在。"""
 
@@ -1197,12 +1259,15 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
         record["task_ids"] = [str(item.get("task_id") or "") for item in history if str(item.get("task_id") or "")]
         self._write_session_record(record)
 
-    def _cleanup_expired_task_records(self) -> None:
+    def _cleanup_expired_task_records(self, force: bool = False) -> Dict[str, int]:
         """清理超过保留时间的普通 task 记录。"""
 
+        result = {"records": 0, "workspaces": 0}
+        if not force and not self.config.task.auto_cleanup_task_records:
+            return result
         ttl_hours = float(self.config.task.resumable_task_ttl_hours)
         if ttl_hours <= 0:
-            return
+            return result
         cutoff = time.time() - ttl_hours * 3600
         for path in self._task_records_dir().glob("*.json"):
             record = self._read_json_file(path)
@@ -1212,10 +1277,177 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
                 continue
             updated_at = float(record.get("updated_at") or record.get("created_at") or 0)
             if updated_at and updated_at < cutoff:
+                workspace_deleted = self._delete_task_workspace_from_record(record)
                 try:
                     path.unlink()
+                    result["records"] += 1
+                    if workspace_deleted:
+                        result["workspaces"] += 1
                 except OSError:
                     continue
+        return result
+
+    def _cleanup_expired_input_files(self, force: bool = False) -> Dict[str, int]:
+        """清理超过保留时间的输入材料文件。"""
+
+        result = {"records": 0, "files": 0, "dirs": 0}
+        if not force and not self.config.input_file.auto_cleanup_input_files:
+            return result
+        ttl_hours = float(self.config.input_file.input_file_ttl_hours)
+        if ttl_hours <= 0:
+            return result
+        cutoff = time.time() - ttl_hours * 3600
+
+        for path in list(self._task_records_dir().glob("*.json")) + list(self._session_records_dir().glob("*.json")):
+            record = self._read_json_file(path)
+            if not record:
+                continue
+            updated_at = float(record.get("updated_at") or record.get("created_at") or 0)
+            if not updated_at or updated_at >= cutoff:
+                continue
+            files_deleted, dir_deleted = self._delete_input_files_from_record(record)
+            if files_deleted or dir_deleted:
+                record["input_files"] = []
+                record["input_files_cleaned_at"] = time.time()
+                self._write_json_file(path, record)
+                result["records"] += 1
+                result["files"] += files_deleted
+                result["dirs"] += 1 if dir_deleted else 0
+        return result
+
+    def _delete_input_files_from_record(self, record: Dict[str, Any]) -> tuple[int, bool]:
+        """按记录删除 workspace/input 下的输入材料。"""
+
+        input_dir_name = self._safe_dir_name(self.config.input_file.input_dir_name or "input")
+        work_root = self._local_work_root().resolve()
+        candidate_files: List[Path] = []
+        for item in record.get("input_files") or []:
+            if not isinstance(item, dict):
+                continue
+            raw_path = str(item.get("path") or "").strip()
+            if raw_path:
+                candidate_files.append(Path(raw_path).expanduser())
+
+        workspace_dir = str(record.get("workspace_dir") or "").strip()
+        input_dir: Optional[Path] = None
+        if workspace_dir:
+            input_dir = Path(workspace_dir).expanduser() / input_dir_name
+            if not candidate_files and input_dir.exists():
+                candidate_files.extend(path for path in input_dir.iterdir() if path.is_file())
+
+        deleted_files = 0
+        for candidate in candidate_files:
+            try:
+                target = candidate.resolve()
+            except OSError:
+                continue
+            if target == work_root or work_root not in target.parents:
+                continue
+            if input_dir is not None:
+                try:
+                    resolved_input_dir = input_dir.resolve()
+                except OSError:
+                    resolved_input_dir = None
+                if resolved_input_dir is not None and resolved_input_dir not in target.parents:
+                    continue
+            if not target.exists() or not target.is_file():
+                continue
+            try:
+                target.unlink()
+                deleted_files += 1
+            except OSError:
+                continue
+
+        dir_deleted = False
+        if input_dir is not None:
+            try:
+                resolved_input_dir = input_dir.resolve()
+            except OSError:
+                resolved_input_dir = None
+            if resolved_input_dir is not None and work_root in resolved_input_dir.parents and resolved_input_dir.exists():
+                try:
+                    resolved_input_dir.rmdir()
+                    dir_deleted = True
+                except OSError:
+                    dir_deleted = False
+        return deleted_files, dir_deleted
+
+    def _delete_task_workspace_from_record(self, record: Dict[str, Any], force: bool = False) -> bool:
+        """按记录删除 task 工作目录。"""
+
+        if not force and not self.config.task.auto_cleanup_task_workspaces:
+            return False
+        task_id = str(record.get("task_id") or "").strip()
+        workspace_dir = str(record.get("workspace_dir") or "").strip()
+        candidates = []
+        if workspace_dir:
+            workspace_path = Path(workspace_dir).expanduser()
+            candidates.append(workspace_path.parent if workspace_path.name == "workspace" else workspace_path)
+        if task_id:
+            candidates.append(self._task_dir_for_id(task_id))
+
+        work_root = self._local_work_root().resolve()
+        for candidate in candidates:
+            try:
+                target = candidate.expanduser().resolve()
+            except OSError:
+                continue
+            if target == work_root or work_root not in target.parents:
+                continue
+            if not target.exists() or not target.is_dir():
+                continue
+            try:
+                shutil.rmtree(target)
+                return True
+            except OSError:
+                continue
+        return False
+
+    def _delete_task_record_by_id(self, task_id: str, delete_workspace: bool = True) -> tuple[bool, bool]:
+        """删除 task 记录和可选 workspace。"""
+
+        normalized = str(task_id or "").strip()
+        if not normalized:
+            return False, False
+        record_path = self._task_records_dir() / f"{normalized}.json"
+        record = self._read_json_file(record_path) or {}
+        if "task_id" not in record:
+            record["task_id"] = normalized
+        workspace_deleted = self._delete_task_workspace_from_record(record, force=delete_workspace)
+        record_deleted = False
+        try:
+            if record_path.exists():
+                record_path.unlink()
+                record_deleted = True
+        except OSError:
+            record_deleted = False
+        self._tasks.pop(normalized, None)
+        return record_deleted, workspace_deleted
+
+    def _delete_session_record_by_name(self, session_name: str) -> tuple[bool, int]:
+        """删除 session 记录和 history 中的 task workspace。"""
+
+        name = self._safe_record_name(session_name)
+        if not name:
+            return False, 0
+        record_path = self._session_records_dir() / f"{name}.json"
+        record = self._read_json_file(record_path)
+        workspace_count = 0
+        if record:
+            record = self._hydrate_session_history(record)
+            task_ids = [str(item.get("task_id") or "") for item in record.get("history", []) if isinstance(item, dict)]
+            for task_id in task_ids:
+                _, workspace_deleted = self._delete_task_record_by_id(task_id, delete_workspace=True)
+                if workspace_deleted:
+                    workspace_count += 1
+        record_deleted = False
+        try:
+            if record_path.exists():
+                record_path.unlink()
+                record_deleted = True
+        except OSError:
+            record_deleted = False
+        return record_deleted, workspace_count
 
     @staticmethod
     def _read_json_file(path: Path) -> Optional[Dict[str, Any]]:
@@ -2256,15 +2488,72 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
 
         task_state = self._tasks.get(normalized_task_id)
         if task_state is None:
+            session_record = self._load_session_record(normalized_task_id)
+            if session_record:
+                latest_task_id = str(session_record.get("latest_task_id") or session_record.get("task_id") or "").strip()
+                suffix = f"\n如需取消正在运行的 session 任务，请使用 task_id：/codex cancel {latest_task_id}" if latest_task_id else ""
+                await self.ctx.send.text(
+                    f"{normalized_task_id} 是 session 记录，不是正在运行的 task。\n"
+                    f"cancel 不会删除 session，也不会清理历史文件。{suffix}",
+                    stream_id,
+                )
+                return
+            record = self._load_task_record(normalized_task_id)
+            if record:
+                status = self._normalize_status(record.get("last_status"), default="unknown")
+                if status in TERMINAL_STATUSES or status == "watch_timeout":
+                    await self.ctx.send.text(f"任务 {normalized_task_id} 已结束，当前状态：{status}，无需取消。", stream_id)
+                    return
+                await self.ctx.send.text(
+                    f"任务 {normalized_task_id} 有本地记录，但当前进程未跟踪，不能终止正在运行的 Codex 进程。",
+                    stream_id,
+                )
+                return
             await self.ctx.send.text(f"本地未跟踪任务：{normalized_task_id}", stream_id)
+            return
+
+        if task_state.last_status in TERMINAL_STATUSES or task_state.last_status == "watch_timeout":
+            old_record = self._read_json_file(self._task_records_dir() / f"{task_state.task_id}.json") or {}
+            old_artifacts = _coerce_artifacts(old_record.get("artifacts") or [])
+            self._record_task_state(task_state, artifacts=old_artifacts)
+            if task_state.record_type == "session" and task_state.session_name:
+                self._update_session_from_task(task_state, artifacts=old_artifacts)
+            await self.ctx.send.text(f"任务 {normalized_task_id} 已结束，当前状态：{task_state.last_status}，无需取消。", stream_id)
             return
 
         if task_state.process is not None and task_state.process.returncode is None:
             task_state.process.terminate()
             task_state.last_status = "cancelled"
+            old_record = self._read_json_file(self._task_records_dir() / f"{task_state.task_id}.json") or {}
+            old_artifacts = _coerce_artifacts(old_record.get("artifacts") or [])
+            self._record_task_state(task_state, artifacts=old_artifacts)
+            if task_state.record_type == "session" and task_state.session_name:
+                self._update_session_from_task(task_state, artifacts=old_artifacts)
             if task_state.watch_task is not None and not task_state.watch_task.done():
                 task_state.watch_task.cancel()
             await self.ctx.send.text(f"任务 {normalized_task_id}: 已请求终止本机 Codex 进程", stream_id)
+            return
+
+        if task_state.process is not None and task_state.process.returncode is not None:
+            task_state.last_status = self._normalize_status(task_state.last_status, default="failed")
+            old_record = self._read_json_file(self._task_records_dir() / f"{task_state.task_id}.json") or {}
+            old_artifacts = _coerce_artifacts(old_record.get("artifacts") or [])
+            self._record_task_state(task_state, artifacts=old_artifacts)
+            if task_state.record_type == "session" and task_state.session_name:
+                self._update_session_from_task(task_state, artifacts=old_artifacts)
+            await self.ctx.send.text(f"任务 {normalized_task_id} 已结束，当前状态：{task_state.last_status}，无需取消。", stream_id)
+            return
+
+        if task_state.task_id.startswith("local_") or task_state.workspace_dir:
+            task_state.last_status = "cancelled"
+            old_record = self._read_json_file(self._task_records_dir() / f"{task_state.task_id}.json") or {}
+            old_artifacts = _coerce_artifacts(old_record.get("artifacts") or [])
+            self._record_task_state(task_state, artifacts=old_artifacts)
+            if task_state.record_type == "session" and task_state.session_name:
+                self._update_session_from_task(task_state, artifacts=old_artifacts)
+            if task_state.watch_task is not None and not task_state.watch_task.done():
+                task_state.watch_task.cancel()
+            await self.ctx.send.text(f"任务 {normalized_task_id}: 已标记为取消。", stream_id)
             return
 
         try:
@@ -2274,6 +2563,11 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
             return
 
         task_state.last_status = self._normalize_status(data.get("status"), default="cancelled")
+        old_record = self._read_json_file(self._task_records_dir() / f"{task_state.task_id}.json") or {}
+        old_artifacts = _coerce_artifacts(old_record.get("artifacts") or [])
+        self._record_task_state(task_state, artifacts=old_artifacts)
+        if task_state.record_type == "session" and task_state.session_name:
+            self._update_session_from_task(task_state, artifacts=old_artifacts)
         if task_state.watch_task is not None and not task_state.watch_task.done():
             task_state.watch_task.cancel()
         message = str(data.get("message") or "已请求取消远程任务").strip()
@@ -2358,8 +2652,12 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
             lines.append("说明：模型未显式配置，由 Codex CLI 自行选择默认值。")
         await self.ctx.send.text("\n".join(lines), stream_id)
 
-    async def _handle_list(self, stream_id: str, platform: str, user_id: str) -> None:
+    async def _handle_list(self, stream_id: str, platform: str, user_id: str, arg: str = "") -> None:
         """列出当前用户可见的最近 task/session。"""
+
+        if arg.strip().lower() in {"all", "全部", "global", "全局"}:
+            await self._handle_list_all(stream_id=stream_id, platform=platform, user_id=user_id)
+            return
 
         scoped_user = self._build_scoped_user(platform, user_id)
         task_records = self._list_task_records(stream_id=stream_id, scoped_user=scoped_user, limit=8)
@@ -2391,6 +2689,141 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
         if len(lines) == 1:
             lines.append("当前没有可显示的记录。")
         await self.ctx.send.text("\n".join(lines), stream_id)
+
+    async def _handle_list_all(self, stream_id: str, platform: str, user_id: str) -> None:
+        """管理员列出所有聊天流的最近 task/session。"""
+
+        if not self._is_admin_user(platform, user_id):
+            await self.ctx.send.text("只有管理员可以查看所有聊天流的 Codex 记录。", stream_id)
+            return
+
+        session_records = self._list_all_session_records(limit=12)
+        task_records = self._list_all_task_records(limit=20)
+        lines = ["Codex 全局记录："]
+        if session_records:
+            lines.append("session：")
+            for record in session_records:
+                history = [item for item in record.get("history", []) if isinstance(item, dict)]
+                lines.append(
+                    f"- {record.get('session_name')}: {record.get('last_status', 'unknown')} / "
+                    f"{record.get('stream_id', '')} / {self._build_scoped_user(str(record.get('platform') or ''), str(record.get('user_id') or ''))} / "
+                    f"{len(history) or len(record.get('task_ids') or [])} 条记录"
+                )
+        if task_records:
+            lines.append("task：")
+            for record in task_records:
+                lines.append(
+                    f"- {record.get('task_id')}: {record.get('last_status', 'unknown')} / "
+                    f"{record.get('stream_id', '')} / {self._build_scoped_user(str(record.get('platform') or ''), str(record.get('user_id') or ''))} / "
+                    f"{_truncate_text(str(record.get('prompt') or ''), 36)}"
+                )
+        if len(lines) == 1:
+            lines.append("当前没有全局记录。")
+        lines.append("")
+        lines.append("删除：/codex clean task <task_id> 或 /codex clean session <session名>")
+        lines.append("删除 session 需要按提示二次确认。")
+        await self.ctx.send.text("\n".join(lines), stream_id)
+
+    async def _handle_clean(self, stream_id: str, platform: str, user_id: str, arg: str) -> None:
+        """管理员清理 task/session 记录和文件。"""
+
+        if not self._is_admin_user(platform, user_id):
+            await self.ctx.send.text("只有管理员可以使用 /codex clean。", stream_id)
+            return
+
+        stripped = arg.strip()
+        if not stripped or stripped.lower() in {"expired", "过期"}:
+            result = self._cleanup_expired_task_records(force=True)
+            input_result = self._cleanup_expired_input_files(force=True)
+            await self.ctx.send.text(
+                f"Codex 清理完成。\n"
+                f"过期 task 记录：{result['records']} 个\n"
+                f"删除 task 文件目录：{result['workspaces']} 个\n"
+                f"过期输入材料：{input_result['files']} 个",
+                stream_id,
+            )
+            return
+
+        parts = stripped.split(maxsplit=2)
+        action = parts[0].lower()
+        if action in {"task", "任务"} and len(parts) >= 2:
+            task_id = parts[1].strip()
+            task_state = self._tasks.get(task_id)
+            if task_state and task_state.last_status in ACTIVE_STATUSES:
+                await self.ctx.send.text(f"任务 {task_id} 仍在运行，请先 /codex cancel {task_id}。", stream_id)
+                return
+            record_deleted, workspace_deleted = self._delete_task_record_by_id(task_id, delete_workspace=True)
+            if not record_deleted and not workspace_deleted:
+                await self.ctx.send.text(f"未找到可清理的 task：{task_id}", stream_id)
+                return
+            await self.ctx.send.text(
+                f"已清理 task：{task_id}\n记录：{'已删除' if record_deleted else '未找到'}\n文件目录：{'已删除' if workspace_deleted else '未找到'}",
+                stream_id,
+            )
+            return
+
+        if action in {"session", "会话"} and len(parts) >= 2:
+            session_name = parts[1].strip()
+            normalized_session = self._safe_record_name(session_name)
+            confirm = len(parts) >= 3 and parts[2].lower() in {"confirm", "确认"}
+            active_session_tasks = [
+                task_state.task_id
+                for task_state in self._tasks.values()
+                if task_state.session_name == normalized_session and task_state.last_status in ACTIVE_STATUSES
+            ]
+            if active_session_tasks:
+                await self.ctx.send.text(
+                    f"session {normalized_session} 仍有运行中的任务：{active_session_tasks[0]}\n请先 /codex cancel {active_session_tasks[0]}。",
+                    stream_id,
+                )
+                return
+            session_record = self._load_session_record(normalized_session)
+            if not session_record:
+                await self.ctx.send.text(f"未找到可清理的 session：{session_name}", stream_id)
+                return
+            history = [item for item in session_record.get("history", []) if isinstance(item, dict)]
+            task_count = len(history) or len(session_record.get("task_ids") or [])
+            if not confirm:
+                await self.ctx.send.text(
+                    f"将删除 session：{normalized_session}\n"
+                    f"关联 task：{task_count} 个\n"
+                    "会同时删除这些 task 的本地记录、workspace、输入材料和产物文件。\n"
+                    f"确认执行：/codex clean session {normalized_session} confirm",
+                    stream_id,
+                )
+                return
+            record_deleted, workspace_count = self._delete_session_record_by_name(normalized_session)
+            if not record_deleted and workspace_count == 0:
+                await self.ctx.send.text(f"未找到可清理的 session：{session_name}", stream_id)
+                return
+            await self.ctx.send.text(
+                f"已清理 session：{normalized_session}\n"
+                f"记录：{'已删除' if record_deleted else '未找到'}\n"
+                f"关联 task 文件目录：已删除 {workspace_count} 个",
+                stream_id,
+            )
+            return
+
+        if action in {"input", "inputs", "material", "materials", "材料", "输入材料"}:
+            input_result = self._cleanup_expired_input_files(force=True)
+            await self.ctx.send.text(
+                f"输入材料清理完成。\n"
+                f"清理记录：{input_result['records']} 个\n"
+                f"删除文件：{input_result['files']} 个\n"
+                f"删除空目录：{input_result['dirs']} 个",
+                stream_id,
+            )
+            return
+
+        await self.ctx.send.text(
+            "用法：\n"
+            "/codex clean 清理过期普通 task\n"
+            "/codex clean input 清理过期输入材料\n"
+            "/codex clean task <task_id> 删除指定 task 记录和文件\n"
+            "/codex clean session <session名> 查看删除影响并要求确认\n"
+            "/codex clean session <session名> confirm 确认删除 session 和关联 task 文件",
+            stream_id,
+        )
 
     async def _handle_session_command(
         self,
@@ -2749,6 +3182,30 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
         records.sort(key=lambda item: float(item.get("updated_at") or item.get("created_at") or 0), reverse=True)
         return records[:limit]
 
+    def _list_all_task_records(self, limit: int = 30) -> List[Dict[str, Any]]:
+        """列出所有聊天流的 task 记录。"""
+
+        records = []
+        for path in self._task_records_dir().glob("*.json"):
+            record = self._read_json_file(path)
+            if not record:
+                continue
+            records.append(record)
+        records.sort(key=lambda item: float(item.get("updated_at") or item.get("created_at") or 0), reverse=True)
+        return records[:limit]
+
+    def _list_all_session_records(self, limit: int = 30) -> List[Dict[str, Any]]:
+        """列出所有聊天流的 session 记录。"""
+
+        records = []
+        for path in self._session_records_dir().glob("*.json"):
+            record = self._read_json_file(path)
+            if not record:
+                continue
+            records.append(self._hydrate_session_history(record))
+        records.sort(key=lambda item: float(item.get("updated_at") or item.get("created_at") or 0), reverse=True)
+        return records[:limit]
+
     def _resolve_resume_record(self, target: str) -> Optional[Dict[str, Any]]:
         """按 task_id 或 session 名找到可恢复记录。"""
 
@@ -2828,9 +3285,11 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
             f"{escaped_prefix} continue <要求> 继续当前用户最近 session\n"
             f"{escaped_prefix} resume <task_id|session名|thread_id> <要求> 恢复指定对话\n"
             f"{escaped_prefix} list 查看当前用户记录\n"
+            f"{escaped_prefix} list all 管理员查看所有聊天流记录\n"
             f"{escaped_prefix} status 查看当前聊天流任务\n"
             f"{escaped_prefix} status <task_id> 查看指定任务\n"
             f"{escaped_prefix} cancel <task_id> 取消指定任务\n"
+            f"{escaped_prefix} clean 管理员清理过期 task\n"
             f"{escaped_prefix} skills 查看可用 Codex skills\n"
             f"{escaped_prefix} mcp 查看当前 Codex MCP 服务器\n"
             f"{escaped_prefix} config 查看当前模型和运行配置\n"

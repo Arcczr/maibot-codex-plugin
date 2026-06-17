@@ -76,6 +76,20 @@ resumable_task_ttl_hours = 24.0
 # 把普通 task 转为 session 时是否要求二次确认。
 require_session_confirm = true
 
+# 启动时是否自动清理超过 resumable_task_ttl_hours 的普通 task 记录。
+auto_cleanup_task_records = true
+
+# 自动清理过期 task 记录时，是否同时删除对应 task workspace 和产物文件。
+# 建议确认产物不需要长期保留后再开启。
+auto_cleanup_task_workspaces = false
+
+# 是否启用后台定时清理。默认关闭；长时间不重启 MaiBot 时可开启。
+enable_periodic_cleanup = false
+
+# 后台定时清理间隔，单位分钟。
+# 每次会按上面的自动清理开关处理过期 task 记录/workspace，并按 input_file 的 TTL 清理输入材料。
+periodic_cleanup_interval_minutes = 60.0
+
 [local_codex]
 # Codex CLI 可执行文件名或绝对路径。
 codex_binary = "codex"
@@ -170,6 +184,13 @@ max_files_per_task = 5
 
 # 单个输入文件最大大小，单位 MB。0 表示不限制。
 max_file_size_mb = 100.0
+
+# 启动时是否自动清理超过 input_file_ttl_hours 的输入材料。
+auto_cleanup_input_files = true
+
+# 输入材料保留时间，单位小时。0 表示不自动清理。
+# 只删除 workspace/input 下的输入材料，不删除产物、日志和 task 记录。
+input_file_ttl_hours = 24.0
 
 # 是否允许从文件消息中的 HTTP URL 下载材料。
 allow_url_download = true
