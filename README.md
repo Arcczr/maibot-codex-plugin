@@ -3,7 +3,7 @@
 > [!NOTE]
 >
 > **免责声明**
-> 本插件代码由 **Codex** 进行编写。作者不对因使用本插件或其生成内容所导致的任何直接或间接的问题、损失或纠纷承担任何责任。**请用户自行评估风险并谨慎使用**。
+> 本插件代码由 **GPT-5.5** 进行编写。作者不对因使用本插件或其生成内容所导致的任何直接或间接的问题、损失或纠纷承担任何责任。**请用户自行评估风险并谨慎使用**。
 
 这个插件用于让 MaiBot 在 QQ 聊天中接收 `/codex` 指令，并在 MaiBot 所在设备上启动 Codex CLI 执行任务。插件会把任务进度、最终摘要和生成的文件产物回传到当前聊天流。
 
@@ -26,7 +26,7 @@ QQ 用户发送 /codex
 进入 MaiBot 插件目录：
 
 ```bash
-cd /root/functional_project/maimai/MaiBot/plugins
+cd ../MaiBot/plugins
 ```
 
 把本仓库放到 `remote_codex_agent` 目录：
@@ -46,13 +46,14 @@ MaiBot/
       _manifest.json
       README.md
 ```
+*如果你不想进行下面的部署,可以让AI阅读项目下的DEPLOYMENT_AI.md文档让他进行部署.如果遇到部署问题,可以附上DEVELOPMENT_AI.md文档。但建议你阅读完本说明*
 
 ### 2. 安装插件依赖
 
 插件依赖 `httpx`。如果 MaiBot 使用 `uv` 启动，建议在 MaiBot 根目录执行：
 
 ```bash
-cd /root/functional_project/maimai/MaiBot
+cd ../MaiBot
 uv add httpx
 ```
 
@@ -81,7 +82,7 @@ codex -a never exec --json --color never -s workspace-write --skip-git-repo-chec
 编辑：
 
 ```bash
-/root/functional_project/maimai/MaiBot/plugins/remote_codex_agent/config.toml
+../MaiBot/plugins/remote_codex_agent/config.toml
 ```
 
 最小可用配置：
@@ -91,7 +92,8 @@ codex -a never exec --json --color never -s workspace-write --skip-git-repo-chec
 enabled = true
 
 [permission]
-allow_all_users = false(一定要检查一遍这一项)
+# 一定要检查这一项；生产环境不建议长期开放给所有人。
+allow_all_users = false
 allowed_users = ["qq:你的QQ号"]
 allowed_groups = []
 
@@ -119,7 +121,7 @@ allow_all_users = true
 在 MaiBot 根目录启动：
 
 ```bash
-cd /root/functional_project/maimai/MaiBot
+cd ../MaiBot
 uv run bot.py
 ```
 
@@ -492,6 +494,8 @@ data/remote_codex_agent/tasks/_records/
 - session 不自动清理，需要管理员手动 `/codex clean session <session名>` 并按提示确认。
 
 ## 远程模式
+
+#### 注意：以下内容未进行调试和验证，不确保其可用性
 
 如果你把配置改成：
 
