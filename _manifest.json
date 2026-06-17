@@ -43,10 +43,10 @@
     "message.get_by_id"
   ],
   "i18n": {
-    "locales_path": "_locales",
-    "supported_locales": [
-      "zh-CN"
-    ]
-  },
+  "default_locale": "zh-CN",
+  "supported_locales": [
+    "zh-CN"
+  ]
+},
   "id": "arcczr.remote-codex-agent"
 }
