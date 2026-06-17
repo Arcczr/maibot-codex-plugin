@@ -45,7 +45,7 @@
   "i18n": {
     "default_locale": "zh-CN",
     "supported_locales": [
-    "zh-CN"
+      "zh-CN"
   ]
 },
   "id": "arcczr.remote-codex-agent"
