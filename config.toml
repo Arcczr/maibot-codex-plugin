@@ -34,7 +34,7 @@ verify_tls = true
 
 [permission]
 # 是否允许所有用户触发。建议保持 false，并配置 allowed_users。
-allow_all_users = true
+allow_all_users = false
 
 # 允许触发的用户。推荐写成 "qq:用户ID"；也兼容只写用户 ID。
 allowed_users = []
@@ -135,7 +135,7 @@ custom_file_message_type = "file"
 [napcat]
 # 是否启用 NapCat HTTP API 直接上传产物文件。
 # 需要在 NapCat WebUI 中为本 bot 新建 HTTP 服务器。
-enabled = true
+enabled = false
 
 # NapCat HTTP Server 协议：http 或 https。
 scheme = "http"
