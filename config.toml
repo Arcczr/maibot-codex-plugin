@@ -9,6 +9,8 @@ enabled = true
 
 [local_codex]
 # Codex CLI 可执行文件名或绝对路径。
+# Ubuntu/Linux 示例："/root/.local/bin/codex" 或 "/usr/local/bin/codex"
+# Windows 示例："C:\\Users\\你的用户名\\AppData\\Roaming\\npm\\codex.cmd"
 codex_binary = "codex"
 
 # 本地任务根目录。相对路径按插件目录解析。
@@ -30,9 +32,6 @@ enable_search = false
 
 # 额外传给 codex exec 的参数，例如 ["--profile", "server-agent"]。
 extra_args = []
-
-# 可选环境变量文件，供本机 Codex 子进程使用。
-env_file = "plugins/remote_codex_agent/.env.local"
 
 # 本地 Codex 任务运行超时，单位秒。
 process_timeout_seconds = 3600.0

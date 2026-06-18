@@ -21,7 +21,6 @@ Tracked source files normally are:
 
 Do not track runtime or local-only files:
 
-- `.env.local`
 - `__pycache__/`
 - `data/`
 - `tasks/`
@@ -149,6 +148,9 @@ Details:
 - `local_codex.model` appends `-m <model>` when non-empty.
 - `local_codex.enable_search = true` appends `--search`.
 - `local_codex.extra_args` is appended before the prompt is sent.
+- If the process environment cannot find `codex`, set `codex_binary` to an
+  absolute path, for example `/root/.local/bin/codex` on Ubuntu/Linux or
+  `C:\Users\YourName\AppData\Roaming\npm\codex.cmd` on Windows.
 - `resume_thread_id` uses `codex exec resume <thread_id>`.
 - Prompt is sent through stdin and stdin is closed.
 - `codex exec` is non-interactive in this plugin. It cannot accept in-flight

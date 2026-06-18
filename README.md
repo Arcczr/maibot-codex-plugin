@@ -101,6 +101,9 @@ allowed_groups = []
 execution_mode = "local"
 
 [local_codex]
+# 也可以填绝对路径：
+# Ubuntu/Linux: "/root/.local/bin/codex" 或 "/usr/local/bin/codex"
+# Windows: "C:\\Users\\你的用户名\\AppData\\Roaming\\npm\\codex.cmd"
 codex_binary = "codex"
 work_root = "data/tasks"
 sandbox = "workspace-write"
@@ -604,7 +607,9 @@ codex -a never exec --json --color never -s workspace-write --skip-git-repo-chec
 - `echo $HOME`
 - `echo $CODEX_HOME`
 - MaiBot 启动用户是否能读取 Codex 登录状态
-- `local_codex.env_file` 是否需要补充环境变量
+- 如启动环境找不到 `codex`，在 `local_codex.codex_binary` 填绝对路径：
+  Ubuntu/Linux 可用 `/root/.local/bin/codex` 或 `/usr/local/bin/codex`；
+  Windows 可用 `C:\Users\你的用户名\AppData\Roaming\npm\codex.cmd`。
 
 ### NapCat 上传失败
 

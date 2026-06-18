@@ -135,7 +135,6 @@ class LocalCodexConfig(PluginConfigBase):
     model: str = Field(default="", description="可选模型名")
     enable_search: bool = Field(default=False, description="是否启用 Codex CLI --search")
     extra_args: List[str] = Field(default_factory=list, description="额外传给 codex exec 的参数")
-    env_file: str = Field(default="plugins/remote_codex_agent/.env.local", description="可选环境变量文件，供本机 Codex 子进程使用")
     process_timeout_seconds: float = Field(default=3600.0, description="本地 Codex 任务运行超时")
     artifact_globs: List[str] = Field(
         default_factory=lambda: ["artifacts/*", "*.docx", "*.pdf", "*.md", "*.zip", "*.xlsx", "*.pptx"],
@@ -2293,27 +2292,9 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
     def _build_local_codex_env(self) -> Dict[str, str]:
         """构造本机 Codex 子进程环境变量。"""
 
-        env = dict(os.environ)
-        env_file_value = str(self.config.local_codex.env_file or "").strip()
-        if not env_file_value:
-            return env
-
-        env_path = Path(env_file_value).expanduser()
-        if not env_path.is_absolute():
-            env_path = Path.cwd() / env_path
-        if not env_path.exists():
-            return env
-
-        for line in env_path.read_text(encoding="utf-8", errors="replace").splitlines():
-            stripped = line.strip()
-            if not stripped or stripped.startswith("#") or "=" not in stripped:
-                continue
-            key, value = stripped.split("=", 1)
-            key = key.strip()
-            if not key:
-                continue
-            env[key] = value.strip().strip('"').strip("'")
-        return env
+        # 不再从插件配置读取 .env 文件，避免把额外密钥注入 Codex 子进程。
+        # Codex CLI 需要的 PATH/HOME/CODEX_HOME 应由 MaiBot 的启动环境提供。
+        return dict(os.environ)
 
     async def _consume_local_stdout(
         self,

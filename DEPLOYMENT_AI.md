@@ -36,7 +36,6 @@ Recommended supporting docs:
 
 Do not deploy or commit runtime data:
 
-- `.env.local`
 - `__pycache__/`
 - `data/`
 - `tasks/`
@@ -109,14 +108,20 @@ BaoTa, systemd, Docker, SSH shells, and VS Code terminals may run as different
 users or with different environment variables. Always test Codex as the actual
 MaiBot process user.
 
-If needed, put environment variables in:
+The plugin does not load an env file for Codex subprocesses. Configure the
+MaiBot process environment itself, or set `local_codex.codex_binary` to an
+absolute executable path.
+
+Absolute path examples:
 
 ```toml
 [local_codex]
-env_file = "plugins/remote_codex_agent/.env.local"
-```
+# Ubuntu/Linux
+codex_binary = "/root/.local/bin/codex"
 
-Do not commit `.env.local`.
+# Windows
+codex_binary = "C:\\Users\\YourName\\AppData\\Roaming\\npm\\codex.cmd"
+```
 
 ## Install Location
 
@@ -170,6 +175,9 @@ enable_periodic_cleanup = false
 periodic_cleanup_interval_minutes = 60.0
 
 [local_codex]
+# Absolute examples:
+# Ubuntu/Linux: "/root/.local/bin/codex" or "/usr/local/bin/codex"
+# Windows: "C:\\Users\\YourName\\AppData\\Roaming\\npm\\codex.cmd"
 codex_binary = "codex"
 work_root = "data/tasks"
 sandbox = "workspace-write"
@@ -440,9 +448,11 @@ If Codex task creation fails:
 
 - Run the Codex CLI smoke command as the MaiBot process user.
 - Check `local_codex.work_root` write permissions.
-- Check `local_codex.env_file`.
 - Check task `stderr.log` and `stdout.jsonl`.
 - Compare `HOME`, `CODEX_HOME`, and `PATH` between shell and process manager.
+- If `codex` is not on `PATH`, set `local_codex.codex_binary` to an absolute
+  path such as `/root/.local/bin/codex` on Ubuntu/Linux or
+  `C:\Users\YourName\AppData\Roaming\npm\codex.cmd` on Windows.
 
 If NapCat artifact upload fails:
 
