@@ -75,8 +75,13 @@ class PermissionConfig(PluginConfigBase):
 
     allow_all_users: bool = Field(default=False, description="是否允许所有用户触发")
     allowed_users: List[str] = Field(default_factory=list, description="允许触发的用户，推荐格式 qq:用户ID")
+    user_list_mode: str = Field(default="whitelist", description="用户列表模式：whitelist 或 blacklist")
+    trigger_users: List[str] = Field(default_factory=list, description="用户黑白名单，推荐格式 qq:用户ID")
     admin_users: List[str] = Field(default_factory=list, description="管理员用户，允许使用高危权限")
     allowed_groups: List[str] = Field(default_factory=list, description="允许触发的群号、qq:群号 或 stream_id")
+    chat_list_mode: str = Field(default="whitelist", description="聊天流列表模式：whitelist 或 blacklist")
+    trigger_chats: List[str] = Field(default_factory=list, description="聊天流黑白名单，可写群号、qq:群号 或 stream_id")
+    reject_temporary_private_chat: bool = Field(default=True, description="是否拒绝 QQ 群临时私聊触发")
 
 
 class TaskConfig(PluginConfigBase):
@@ -136,6 +141,12 @@ class ProgressConfig(PluginConfigBase):
     max_progress_items_per_message: int = Field(default=5, description="每次最多合并多少条进度")
     max_progress_item_chars: int = Field(default=300, description="单条进度最大字符数")
     max_summary_chars: int = Field(default=1800, description="最终摘要最大字符数")
+    enable_private_progress: bool = Field(default=False, description="是否允许用户用参数请求私聊接收阶段性进度")
+    private_progress_trigger_args: List[str] = Field(
+        default_factory=lambda: ["--dm", "--private-progress"],
+        description="触发私聊进度的命令参数",
+    )
+    private_progress_fallback_to_origin: bool = Field(default=True, description="私聊进度发送失败时是否回退到原聊天流")
 
 
 class ArtifactConfig(PluginConfigBase):
@@ -233,6 +244,9 @@ class RemoteTaskState:
     record_type: str = "task"
     session_name: str = ""
     parent_task_id: str = ""
+    private_progress: bool = False
+    private_progress_user_id: str = ""
+    private_progress_failure_notified: bool = False
 
 
 class RemoteAgentClient:
@@ -711,6 +725,12 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
         if not stream_id:
             return False, "无法获取当前聊天流 ID", True
 
+        command_message = kwargs.get("message")
+        if self.config.permission.reject_temporary_private_chat and self._is_temporary_private_chat(command_message):
+            message = "当前是 QQ 群临时会话，消息路由可能不稳定。请在群聊中使用 /codex，或先主动私聊机器人后再使用。"
+            await self._try_send_private_notice(user_id, message)
+            return False, message, True
+
         permission_error = self._check_permission(platform=platform, user_id=user_id, group_id=group_id, stream_id=stream_id)
         if permission_error:
             await self.ctx.send.text(permission_error, stream_id)
@@ -760,7 +780,7 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
                 platform=platform,
                 user_id=user_id,
                 group_id=group_id,
-                command_message=kwargs.get("message"),
+                command_message=command_message,
             )
             return handled, message, True
 
@@ -781,9 +801,14 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
                 platform=platform,
                 user_id=user_id,
                 group_id=group_id,
-                command_message=kwargs.get("message"),
+                command_message=command_message,
             )
             return handled, message, True
+
+        parsed_prompt, private_progress = self._parse_private_progress_args(command_body)
+        if not parsed_prompt:
+            await self.ctx.send.text("用法：/codex --dm <任务描述>", stream_id)
+            return False, "任务描述为空", True
 
         execution_mode = self._get_execution_mode()
         if execution_mode == "remote":
@@ -803,7 +828,7 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
             await self.ctx.send.text(limit_error, stream_id)
             return False, limit_error, True
 
-        path_error = self._check_prompt_local_path_access(command_body)
+        path_error = self._check_prompt_local_path_access(parsed_prompt)
         if path_error:
             await self.ctx.send.text(path_error, stream_id)
             return False, path_error, True
@@ -814,22 +839,24 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
                 await self.ctx.send.text(dangerous_error, stream_id)
                 return False, dangerous_error, True
             return await self._create_local_task(
-                prompt=command_body,
+                prompt=parsed_prompt,
                 raw_command=raw_command,
                 stream_id=stream_id,
                 platform=platform,
                 user_id=user_id,
                 group_id=group_id,
-                command_message=kwargs.get("message"),
+                command_message=command_message,
+                private_progress=private_progress,
             )
 
         return await self._create_remote_task(
-            prompt=command_body,
+            prompt=parsed_prompt,
             raw_command=raw_command,
             stream_id=stream_id,
             platform=platform,
             user_id=user_id,
             group_id=group_id,
+            private_progress=private_progress,
         )
 
     def _extract_raw_command(self, matched_groups: Optional[Dict[str, Any]], kwargs: Dict[str, Any]) -> str:
@@ -851,6 +878,67 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
 
         return raw_command.split(maxsplit=1)[0].strip().lower()
 
+    @staticmethod
+    def _is_temporary_private_chat(message: Any) -> bool:
+        """判断是否是 QQ 群临时私聊。"""
+
+        if isinstance(message, dict):
+            message_info = message.get("message_info") if isinstance(message.get("message_info"), dict) else {}
+            additional_config = message_info.get("additional_config") if isinstance(message_info, dict) else {}
+            group_info = message_info.get("group_info") if isinstance(message_info, dict) else {}
+        else:
+            message_info = getattr(message, "message_info", None)
+            additional_config = getattr(message_info, "additional_config", None)
+            group_info = getattr(message_info, "group_info", None)
+        if not isinstance(additional_config, dict):
+            return False
+        message_type = str(additional_config.get("napcat_message_type") or "").strip().lower()
+        target_group_id = str(additional_config.get("platform_io_target_group_id") or "").strip()
+        target_user_id = str(additional_config.get("platform_io_target_user_id") or "").strip()
+        if isinstance(group_info, dict):
+            group_info_id = str(group_info.get("group_id") or "").strip()
+        else:
+            group_info_id = str(getattr(group_info, "group_id", "") or "").strip()
+        has_group_info = bool(target_group_id or group_info_id)
+        return message_type == "private" and has_group_info and not target_user_id
+
+    async def _try_send_private_notice(self, user_id: str, message: str) -> None:
+        """尝试私聊发送提示，失败时静默拦截。"""
+
+        normalized_user_id = str(user_id or "").strip()
+        if not normalized_user_id or not self.config.napcat.enabled:
+            self.ctx.logger.info("已拒绝 QQ 群临时私聊 Codex 指令，未发送提示：缺少 user_id 或 NapCat 未启用")
+            return
+        try:
+            await self._napcat_client.call_action(
+                "send_private_msg",
+                {
+                    "user_id": normalized_user_id,
+                    "message": [{"type": "text", "data": {"text": message}}],
+                },
+            )
+        except Exception as exc:
+            self.ctx.logger.info("已拒绝 QQ 群临时私聊 Codex 指令，私聊提示发送失败: %s", exc)
+
+    def _parse_private_progress_args(self, prompt: str) -> tuple[str, bool]:
+        """识别并移除请求私聊进度的命令参数。"""
+
+        if not self.config.progress.enable_private_progress:
+            return prompt, False
+
+        trigger_args = _normalize_set(self.config.progress.private_progress_trigger_args)
+        if not trigger_args:
+            return prompt, False
+
+        kept_parts: List[str] = []
+        enabled = False
+        for part in str(prompt or "").split():
+            if part.strip().lower() in trigger_args:
+                enabled = True
+                continue
+            kept_parts.append(part)
+        return " ".join(kept_parts).strip(), enabled
+
     def _check_permission(self, platform: str, user_id: str, group_id: str, stream_id: str) -> str:
         """检查当前用户和聊天流是否允许触发。"""
 
@@ -860,23 +948,54 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
         normalized_group_id = str(group_id or "").strip().lower()
         normalized_stream_id = str(stream_id or "").strip().lower()
 
+        user_candidates = {normalized_user_id}
+        if normalized_platform and normalized_user_id:
+            user_candidates.add(f"{normalized_platform}:{normalized_user_id}")
+
+        legacy_allowed_users = _normalize_set(permission.allowed_users)
+        trigger_users = _normalize_set(permission.trigger_users)
+        user_list_mode = self._normalize_list_mode(permission.user_list_mode)
         if not permission.allow_all_users:
-            allowed_users = _normalize_set(permission.allowed_users)
-            user_candidates = {normalized_user_id}
-            if normalized_platform and normalized_user_id:
-                user_candidates.add(f"{normalized_platform}:{normalized_user_id}")
+            allowed_users = legacy_allowed_users | (trigger_users if user_list_mode == "whitelist" else set())
             if not allowed_users or allowed_users.isdisjoint(user_candidates):
                 return "你没有权限触发远程 Codex Agent。"
+        elif user_list_mode == "whitelist" and trigger_users and trigger_users.isdisjoint(user_candidates):
+            return "你没有权限触发远程 Codex Agent。"
+        elif user_list_mode == "blacklist" and trigger_users and not trigger_users.isdisjoint(user_candidates):
+            return "你没有权限触发远程 Codex Agent。"
 
-        allowed_groups = _normalize_set(permission.allowed_groups)
-        if allowed_groups:
-            group_candidates = {normalized_stream_id, normalized_group_id}
-            if normalized_platform and normalized_group_id:
-                group_candidates.add(f"{normalized_platform}:{normalized_group_id}")
-            if allowed_groups.isdisjoint({candidate for candidate in group_candidates if candidate}):
+        chat_candidates = self._build_chat_candidates(normalized_platform, normalized_group_id, normalized_stream_id)
+        legacy_allowed_groups = _normalize_set(permission.allowed_groups)
+        if legacy_allowed_groups:
+            if legacy_allowed_groups.isdisjoint(chat_candidates):
                 return "当前聊天流不允许触发远程 Codex Agent。"
 
+        trigger_chats = _normalize_set(permission.trigger_chats)
+        chat_list_mode = self._normalize_list_mode(permission.chat_list_mode)
+        if chat_list_mode == "whitelist" and trigger_chats and trigger_chats.isdisjoint(chat_candidates):
+            return "当前聊天流不允许触发远程 Codex Agent。"
+        if chat_list_mode == "blacklist" and trigger_chats and not trigger_chats.isdisjoint(chat_candidates):
+            return "当前聊天流不允许触发远程 Codex Agent。"
+
         return ""
+
+    @staticmethod
+    def _normalize_list_mode(value: str) -> str:
+        """规范化黑白名单模式。"""
+
+        normalized = str(value or "").strip().lower()
+        if normalized in {"black", "blacklist", "block", "blocklist", "deny", "denylist"}:
+            return "blacklist"
+        return "whitelist"
+
+    @staticmethod
+    def _build_chat_candidates(platform: str, group_id: str, stream_id: str) -> set[str]:
+        """构造当前聊天流匹配候选。"""
+
+        candidates = {stream_id, group_id}
+        if platform and group_id:
+            candidates.add(f"{platform}:{group_id}")
+        return {candidate for candidate in candidates if candidate}
 
     def _check_dangerous_local_permission(self, platform: str, user_id: str) -> str:
         """限制 danger-full-access 仅管理员可用。"""
@@ -976,6 +1095,7 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
         platform: str,
         user_id: str,
         group_id: str,
+        private_progress: bool = False,
     ) -> tuple[bool, str, bool]:
         """向远程服务创建任务并启动本地轮询。"""
 
@@ -1017,12 +1137,16 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
             group_id=group_id,
             prompt=prompt,
             last_status=self._normalize_status(response_data.get("status"), default="queued"),
+            private_progress=private_progress,
+            private_progress_user_id=user_id if private_progress else "",
         )
         self._tasks[task_id] = task_state
         task_state.watch_task = asyncio.create_task(self._watch_remote_task(task_state), name=f"remote_codex:{task_id}")
 
         remote_message = str(response_data.get("message") or "").strip()
         reply = f"远程 Codex 任务已创建：{task_id}"
+        if private_progress:
+            reply = f"{reply}\n阶段性进度将尝试私聊发送给你。"
         if remote_message:
             reply = f"{reply}\n{remote_message}"
         await self.ctx.send.text(reply, stream_id)
@@ -1041,6 +1165,7 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
         session_name: str = "",
         resume_thread_id: str = "",
         parent_task_id: str = "",
+        private_progress: bool = False,
     ) -> tuple[bool, str, bool]:
         """创建本机 Codex CLI 任务。"""
 
@@ -1070,6 +1195,8 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
             session_name=session_name,
             codex_thread_id=resume_thread_id if resume_thread_id else "",
             parent_task_id=parent_task_id,
+            private_progress=private_progress,
+            private_progress_user_id=user_id if private_progress else "",
         )
         self._tasks[task_id] = task_state
         self._record_task_state(task_state)
@@ -1097,6 +1224,8 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
             if len(input_files) > 3:
                 names = f"{names} 等 {len(input_files)} 个文件"
             created_message = f"{created_message}\n已导入参考文件：{names}"
+        if private_progress:
+            created_message = f"{created_message}\n阶段性进度将尝试私聊发送给你。"
         await self.ctx.send.text(created_message, stream_id)
         return True, f"本机任务已创建: {task_id}", True
 
@@ -2315,7 +2444,31 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
         max_chars = max(int(self.config.progress.max_progress_item_chars), 20)
         progress_text = self._sanitize_task_output_text(task_state, progress_text)
         message = _format_progress_message(task_state.task_id, [progress_text], max_chars)
-        await self.ctx.send.text(message, task_state.stream_id)
+        await self._send_progress_text(task_state, message)
+
+    async def _send_progress_text(self, task_state: RemoteTaskState, message: str) -> None:
+        """按任务设置发送进度消息。"""
+
+        if task_state.private_progress and task_state.private_progress_user_id and self.config.napcat.enabled:
+            try:
+                await self._napcat_client.call_action(
+                    "send_private_msg",
+                    {
+                        "user_id": task_state.private_progress_user_id,
+                        "message": [{"type": "text", "data": {"text": message}}],
+                    },
+                )
+                return
+            except Exception as exc:
+                self.ctx.logger.warning("Codex 私聊进度发送失败: %s", exc)
+                if not task_state.private_progress_failure_notified:
+                    task_state.private_progress_failure_notified = True
+                    notice = f"任务 {task_state.task_id} 私聊进度发送失败，后续进度将发回当前聊天。"
+                    if self.config.progress.private_progress_fallback_to_origin:
+                        await self.ctx.send.text(notice, task_state.stream_id)
+
+        if self.config.progress.private_progress_fallback_to_origin or not task_state.private_progress:
+            await self.ctx.send.text(message, task_state.stream_id)
 
     async def _queue_local_progress(self, task_state: RemoteTaskState, progress_text: str) -> None:
         """延后一条本机进度，避免把最终回答提前当进度发出。"""
@@ -2428,7 +2581,7 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
             [item["text"] for item in selected_items],
             max_chars,
         )
-        await self.ctx.send.text(message, task_state.stream_id)
+        await self._send_progress_text(task_state, message)
         task_state.last_progress_sent_at = now
 
     async def _send_final_result(self, task_state: RemoteTaskState, data: Dict[str, Any]) -> None:
@@ -2979,8 +3132,9 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
 
         session_name = self._safe_record_name(parts[0])
         prompt = stripped[len(parts[0]) :].strip()
+        prompt, private_progress = self._parse_private_progress_args(prompt)
         if not session_name or not prompt:
-            await self.ctx.send.text("用法：/codex session <会话名> <任务描述>", stream_id)
+            await self.ctx.send.text("用法：/codex session <会话名> [--dm] <任务描述>", stream_id)
             return False, "session 参数不足"
         path_error = self._check_prompt_local_path_access(prompt)
         if path_error:
@@ -3004,6 +3158,7 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
             command_message=command_message,
             record_type="session",
             session_name=session_name,
+            private_progress=private_progress,
         )
         return result[0], result[1]
 
@@ -3024,8 +3179,9 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
         if dangerous_error:
             await self.ctx.send.text(dangerous_error, stream_id)
             return False, dangerous_error
+        prompt, private_progress = self._parse_private_progress_args(prompt)
         if not prompt.strip():
-            await self.ctx.send.text("用法：/codex continue <继续处理的要求>", stream_id)
+            await self.ctx.send.text("用法：/codex continue [--dm] <继续处理的要求>", stream_id)
             return False, "continue 缺少要求"
         path_error = self._check_prompt_local_path_access(prompt)
         if path_error:
@@ -3053,6 +3209,7 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
             session_name=str(session_record.get("session_name") or ""),
             resume_thread_id=thread_id,
             parent_task_id=str(session_record.get("latest_task_id") or session_record.get("task_id") or ""),
+            private_progress=private_progress,
         )
         return result[0], result[1]
 
@@ -3081,6 +3238,10 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
             return False, "resume 参数不足"
 
         target, prompt = parts[0], parts[1].strip()
+        prompt, private_progress = self._parse_private_progress_args(prompt)
+        if not prompt:
+            await self.ctx.send.text("用法：/codex resume <task_id|session名|thread_id> [--dm] <继续处理的要求>", stream_id)
+            return False, "resume 缺少要求"
         path_error = self._check_prompt_local_path_access(prompt)
         if path_error:
             await self.ctx.send.text(path_error, stream_id)
@@ -3106,6 +3267,7 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
             session_name=session_name,
             resume_thread_id=thread_id,
             parent_task_id=str((record or {}).get("latest_task_id") or (record or {}).get("task_id") or ""),
+            private_progress=private_progress,
         )
         return result[0], result[1]
 
@@ -3406,10 +3568,11 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
         return (
             "远程 Codex Agent 命令：\n"
             f"{escaped_prefix} <任务描述> 创建一次性 task\n"
-            f"{escaped_prefix} session <会话名> <任务描述> 创建持久 session\n"
+            f"{escaped_prefix} --dm <任务描述> 阶段性进度尝试私聊发送给你\n"
+            f"{escaped_prefix} session <会话名> [--dm] <任务描述> 创建持久 session\n"
             f"{escaped_prefix} session <task_id> confirm [会话名] 将 task 转为 session\n"
-            f"{escaped_prefix} continue <要求> 继续当前用户最近 session\n"
-            f"{escaped_prefix} resume <task_id|session名|thread_id> <要求> 恢复指定对话\n"
+            f"{escaped_prefix} continue [--dm] <要求> 继续当前用户最近 session\n"
+            f"{escaped_prefix} resume <task_id|session名|thread_id> [--dm] <要求> 恢复指定对话\n"
             f"{escaped_prefix} list 查看当前用户记录\n"
             f"{escaped_prefix} list all 管理员查看所有聊天流记录\n"
             f"{escaped_prefix} status 查看当前聊天流任务\n"

@@ -4,7 +4,7 @@
 # 配置文件版本
 config_version = "0.3.0"
 
-# 是否启用插件。触发权限仍由 permission.allowed_users / allow_all_users 控制。
+# 是否启用插件。触发权限由 permission 控制。
 enabled = true
 
 [server]
@@ -33,17 +33,39 @@ request_timeout_seconds = 20.0
 verify_tls = true
 
 [permission]
-# 是否允许所有用户触发。建议保持 false，并配置 allowed_users。
-allow_all_users = false
+# 是否允许所有用户触发。
+# true 表示默认所有用户都能触发；如 user_list_mode = "blacklist"，trigger_users 里的用户仍会被禁止。
+# false 表示必须通过用户白名单；可使用旧 allowed_users，或使用 user_list_mode = "whitelist" + trigger_users。
+allow_all_users = true
 
-# 允许触发的用户。推荐写成 "qq:用户ID"；也兼容只写用户 ID。
+# 旧版用户白名单，保留兼容。推荐新配置使用 user_list_mode + trigger_users。
 allowed_users = []
 
-# 管理员用户。允许使用 danger-full-access 等高危配置。
-admin_users = []
+# 用户名单模式：whitelist 或 blacklist。
+# whitelist：只有 trigger_users 里的用户能触发。
+# blacklist：trigger_users 里的用户不能触发，其他用户按 allow_all_users 规则处理。
+user_list_mode = "blacklist"
 
-# 允许触发的群或聊天流。可写群号、"qq:群号" 或 stream_id。空列表表示不限制聊天流。
+# 用户黑白名单。推荐写成 "qq:用户ID"；也兼容只写用户 ID。
+trigger_users = []
+
+# 管理员用户。允许使用 danger-full-access 等高危配置。
+admin_users = ["1404890996"]
+
+# 旧版聊天流白名单，保留兼容。推荐新配置使用 chat_list_mode + trigger_chats。
 allowed_groups = []
+
+# 聊天流名单模式：whitelist 或 blacklist。
+# 聊天流就是触发 /codex 的地方，可以是 QQ 群、QQ 私聊或 MaiBot 识别到的其他对话来源。
+# 如果你只在群里使用，把这里当成“群组黑白名单”理解即可。
+chat_list_mode = "blacklist"
+
+# 聊天流黑白名单。可写群号、"qq:群号" 或 stream_id；空列表表示不限制聊天流。
+trigger_chats = []
+
+# 是否拒绝 QQ 群临时私聊触发。
+# 群临时会话在部分 adapter 路由下可能把回复发回群聊，建议保持 true。
+reject_temporary_private_chat = true
 
 [task]
 # 帮助文本默认展示的主命令前缀。命令组件当前固定支持 /codex 和 /agent。
@@ -145,6 +167,18 @@ max_progress_item_chars = 300
 # 最终摘要最大字符数
 max_summary_chars = 1800
 
+# 是否允许用户在创建任务时添加参数，把阶段性进度私聊发送给触发用户。
+# 需要 napcat.enabled = true，且机器人能私聊该用户；失败时可回退当前聊天流。
+# QQ/NapCat 发送私聊通常要求触发用户先主动私聊机器人一次。
+# 群临时会话不等同于好友私聊，可能发送失败。
+enable_private_progress = true
+
+# 触发私聊进度的参数。示例：/codex --dm 生成一份报告
+private_progress_trigger_args = ["--dm", "--private-progress"]
+
+# 私聊进度发送失败时，是否回退到原聊天流发送进度。
+private_progress_fallback_to_origin = true
+
 [artifact]
 # 是否在完成时发送产物列表或下载链接
 send_artifact_links = true
@@ -159,7 +193,7 @@ custom_file_message_type = "file"
 [napcat]
 # 是否启用 NapCat HTTP API 直接上传产物文件。
 # 需要在 NapCat WebUI 中为本 bot 新建 HTTP 服务器。
-enabled = false
+enabled = true
 
 # NapCat HTTP Server 协议：http 或 https。
 scheme = "http"
