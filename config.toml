@@ -36,7 +36,7 @@ verify_tls = true
 # 是否允许所有用户触发。
 # true 表示默认所有用户都能触发；如 user_list_mode = "blacklist"，trigger_users 里的用户仍会被禁止。
 # false 表示必须通过用户白名单；可使用旧 allowed_users，或使用 user_list_mode = "whitelist" + trigger_users。
-allow_all_users = true
+allow_all_users = false
 
 # 旧版用户白名单，保留兼容。推荐新配置使用 user_list_mode + trigger_users。
 allowed_users = []
@@ -50,7 +50,7 @@ user_list_mode = "blacklist"
 trigger_users = []
 
 # 管理员用户。允许使用 danger-full-access 等高危配置。
-admin_users = ["1404890996"]
+admin_users = []
 
 # 旧版聊天流白名单，保留兼容。推荐新配置使用 chat_list_mode + trigger_chats。
 allowed_groups = []
@@ -193,7 +193,7 @@ custom_file_message_type = "file"
 [napcat]
 # 是否启用 NapCat HTTP API 直接上传产物文件。
 # 需要在 NapCat WebUI 中为本 bot 新建 HTTP 服务器。
-enabled = true
+enabled = false
 
 # NapCat HTTP Server 协议：http 或 https。
 scheme = "http"
