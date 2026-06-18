@@ -130,24 +130,10 @@ try_custom_file_message = false
 custom_file_message_type = "file"
 
 [napcat]
-# 是否启用 NapCat HTTP API 直接上传产物文件。
-# 需要在 NapCat WebUI 中为本 bot 新建 HTTP 服务器。
+# 是否启用 NapCat Adapter API 高级能力。
+# 开启后可通过 MaiBot SDK 调用 adapter.napcat.* 公开 API，用于产物直传、私聊进度和补全 QQ 文件信息。
+# 不需要在插件里配置 NapCat 服务地址或 token。
 enabled = false
-
-# NapCat HTTP Server 协议：http 或 https。
-scheme = "http"
-
-# NapCat HTTP Server 地址。和 MaiBot 同机部署通常填 127.0.0.1。
-host = "127.0.0.1"
-
-# NapCat HTTP Server 端口，例如在 NapCat WebUI 里新增 9998。
-port = 9998
-
-# NapCat HTTP Server token。若 NapCat 该端口未设置 token，留空。
-token = ""
-
-# 上传请求超时秒数。大文件可适当调高。
-request_timeout_seconds = 120.0
 
 # 调用 upload_group_file/upload_private_file 时是否执行真实上传。
 upload_file = true
@@ -177,6 +163,9 @@ input_file_ttl_hours = 24.0
 
 # 是否允许从文件消息中的 HTTP URL 下载材料。
 allow_url_download = true
+
+# 从文件消息 URL 下载材料的超时时间，单位秒。
+download_timeout_seconds = 120.0
 
 # 允许复制的本地文件根目录。空列表表示禁止复制服务器本地路径。
 # 日常使用建议通过 QQ 上传文件；确需读取本地目录时，由管理员显式配置允许根目录。

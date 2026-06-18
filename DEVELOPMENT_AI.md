@@ -43,7 +43,7 @@ Major groups inside `plugin.py`:
   `LocalCodexConfig`, `ProgressConfig`, `ArtifactConfig`, `NapCatConfig`,
   `InputFileConfig`, `RemoteCodexAgentConfig`
 - Runtime models: `InputFile`, `RemoteTaskState`
-- HTTP clients: `RemoteAgentClient`, `NapCatUploadClient`
+- HTTP clients: `RemoteAgentClient`; NapCat operations go through MaiBot SDK `ctx.api.call`
 - Main plugin lifecycle and command entry: `RemoteCodexAgentPlugin`,
   `handle_codex_command`
 - Local Codex execution: `_create_local_task`, `_run_local_codex_task`,
@@ -71,7 +71,7 @@ Possible future split:
 plugin.py          # plugin entry, lifecycle, Command decorator
 config.py          # config models
 models.py          # dataclasses and status constants
-clients.py         # RemoteAgentClient, NapCatUploadClient
+clients.py         # RemoteAgentClient
 records.py         # task/session records and cleanup
 input_files.py     # QQ reply-file import
 local_codex.py     # Codex CLI process and stdout/final parsing

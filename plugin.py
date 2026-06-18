@@ -154,7 +154,7 @@ class ProgressConfig(PluginConfigBase):
     max_progress_items_per_message: int = Field(default=5, description="每次最多合并多少条进度")
     max_progress_item_chars: int = Field(default=300, description="单条进度最大字符数")
     max_summary_chars: int = Field(default=1800, description="最终摘要最大字符数")
-    # 私聊进度依赖 NapCat HTTP API 的 send_private_msg。
+    # 私聊进度依赖 NapCat Adapter 公开 API 的 send_private_msg。
     # QQ 侧通常要求用户先主动私聊过机器人，否则可能发送失败。
     enable_private_progress: bool = Field(default=False, description="是否允许用户用参数请求私聊接收阶段性进度")
     private_progress_trigger_args: List[str] = Field(
@@ -179,18 +179,13 @@ class ArtifactConfig(PluginConfigBase):
 
 
 class NapCatConfig(PluginConfigBase):
-    """NapCat 直连配置。"""
+    """NapCat Adapter API 配置。"""
 
     __ui_label__: ClassVar[str] = "NapCat 直传"
     __ui_icon__: ClassVar[str] = "upload"
     __ui_order__: ClassVar[int] = 7
 
-    enabled: bool = Field(default=False, description="是否启用 NapCat HTTP API 直接上传产物文件")
-    scheme: str = Field(default="http", description="NapCat HTTP Server 协议：http 或 https")
-    host: str = Field(default="127.0.0.1", description="NapCat HTTP Server 地址")
-    port: int = Field(default=9998, description="NapCat HTTP Server 端口")
-    token: str = Field(default="", description="NapCat HTTP Server token，留空则不发送鉴权头")
-    request_timeout_seconds: float = Field(default=120.0, description="NapCat 上传请求超时秒数")
+    enabled: bool = Field(default=False, description="是否启用 NapCat Adapter API 上传产物和补全文件信息")
     upload_file: bool = Field(default=True, description="调用 upload_*_file 时是否执行真实上传")
     max_file_size_mb: float = Field(default=100.0, description="单个产物最大上传大小，0 表示不限制")
 
@@ -207,6 +202,7 @@ class InputFileConfig(PluginConfigBase):
     max_files_per_task: int = Field(default=5, description="单个任务最多导入多少个文件")
     max_file_size_mb: float = Field(default=100.0, description="单个输入文件最大大小，0 表示不限制")
     allow_url_download: bool = Field(default=True, description="是否允许从 QQ 文件消息中的 HTTP URL 下载输入文件")
+    download_timeout_seconds: float = Field(default=120.0, description="输入文件 URL 下载超时秒数")
     allowed_local_roots: List[str] = Field(default_factory=list, description="允许复制的本地文件根目录，空列表表示禁止复制本地路径")
     auto_cleanup_input_files: bool = Field(default=True, description="启动时是否自动清理过期输入材料")
     input_file_ttl_hours: float = Field(default=24.0, description="输入材料保留小时数，0 表示不自动清理")
@@ -222,7 +218,7 @@ class RemoteCodexAgentConfig(PluginConfigBase):
     local_codex: LocalCodexConfig = Field(default_factory=LocalCodexConfig, description="本机 Codex CLI 配置")
     progress: ProgressConfig = Field(default_factory=ProgressConfig, description="进度转发配置")
     artifact: ArtifactConfig = Field(default_factory=ArtifactConfig, description="产物回传配置")
-    napcat: NapCatConfig = Field(default_factory=NapCatConfig, description="NapCat 直连配置")
+    napcat: NapCatConfig = Field(default_factory=NapCatConfig, description="NapCat Adapter API 配置")
     input_file: InputFileConfig = Field(default_factory=InputFileConfig, description="输入文件配置")
 
 
@@ -349,149 +345,6 @@ class RemoteAgentClient:
         data = response.json()
         if not isinstance(data, dict):
             raise ValueError("远程服务取消任务响应不是 JSON 对象")
-        return data
-
-
-class NapCatUploadClient:
-    """NapCat HTTP API 文件上传客户端。"""
-
-    def __init__(self, config: RemoteCodexAgentConfig) -> None:
-        self._config = config
-        self._client: Optional[httpx.AsyncClient] = None
-
-    async def close(self) -> None:
-        """关闭 HTTP 客户端。"""
-
-        if self._client is not None:
-            await self._client.aclose()
-            self._client = None
-
-    def update_config(self, config: RemoteCodexAgentConfig) -> None:
-        """更新配置；下次请求使用新配置。"""
-
-        self._config = config
-
-    def _get_client(self) -> httpx.AsyncClient:
-        """获取或创建 HTTP 客户端。"""
-
-        if self._client is None:
-            timeout = max(float(self._config.napcat.request_timeout_seconds), 1.0)
-            self._client = httpx.AsyncClient(timeout=timeout)
-        return self._client
-
-    def _build_url(self, action: str) -> str:
-        """构造 NapCat HTTP action URL。"""
-
-        scheme = str(self._config.napcat.scheme or "http").strip().lower()
-        if scheme not in {"http", "https"}:
-            raise ValueError("napcat.scheme 只能是 http 或 https")
-        host = str(self._config.napcat.host or "").strip()
-        port = int(self._config.napcat.port)
-        if not host:
-            raise ValueError("未配置 napcat.host")
-        return f"{scheme}://{host}:{port}/{action.strip('/')}"
-
-    def _headers(self) -> Dict[str, str]:
-        """构造请求头。"""
-
-        headers = {"Content-Type": "application/json"}
-        token = str(self._config.napcat.token or "").strip()
-        if token:
-            headers["Authorization"] = f"Bearer {token}"
-        return headers
-
-    async def upload_artifact(
-        self,
-        task_state: RemoteTaskState,
-        artifact: Dict[str, Any],
-        force_private: bool = False,
-    ) -> Dict[str, Any]:
-        """上传一个产物到当前 QQ 群聊或私聊。"""
-
-        file_value = self._extract_file_value(artifact)
-        name = self._extract_name(artifact, file_value)
-        self._check_file_size(artifact, file_value)
-
-        # 默认产物回到任务来源：群里触发就发群文件，私聊触发就发私聊文件。
-        # force_private 用于 /codex --dm 且配置要求“产物也私聊”的场景。
-        group_id = str(task_state.group_id or "").strip()
-        user_id = str(task_state.user_id or "").strip()
-        if group_id and not force_private:
-            action = "upload_group_file"
-            payload: Dict[str, Any] = {
-                "group_id": group_id,
-                "file": file_value,
-                "name": name,
-                "upload_file": bool(self._config.napcat.upload_file),
-            }
-        elif user_id:
-            action = "upload_private_file"
-            payload = {
-                "user_id": user_id,
-                "file": file_value,
-                "name": name,
-                "upload_file": bool(self._config.napcat.upload_file),
-            }
-        else:
-            raise ValueError("无法获取当前聊天的 group_id 或 user_id，不能直传文件")
-
-        response = await self._get_client().post(self._build_url(action), headers=self._headers(), json=payload)
-        response.raise_for_status()
-        data = response.json()
-        if not isinstance(data, dict):
-            raise ValueError("NapCat 上传响应不是 JSON 对象")
-        if data.get("status") != "ok":
-            message = data.get("message") or data.get("wording") or data
-            raise RuntimeError(f"NapCat 上传失败：{message}")
-        return data
-
-    @staticmethod
-    def _extract_file_value(artifact: Dict[str, Any]) -> str:
-        """从产物信息中提取可交给 NapCat 的文件路径或 URL。"""
-
-        for key in ("path", "file", "url", "download_url"):
-            value = str(artifact.get(key) or "").strip()
-            if value:
-                return value
-        raise ValueError("产物缺少 path/file/url/download_url，无法直传")
-
-    @staticmethod
-    def _extract_name(artifact: Dict[str, Any], file_value: str) -> str:
-        """提取 QQ 文件显示名。"""
-
-        name = str(artifact.get("name") or artifact.get("filename") or "").strip()
-        if name:
-            return name
-        return Path(file_value).name or "codex_artifact"
-
-    def _check_file_size(self, artifact: Dict[str, Any], file_value: str) -> None:
-        """检查上传大小限制。"""
-
-        max_file_size_mb = float(self._config.napcat.max_file_size_mb)
-        if max_file_size_mb <= 0:
-            return
-
-        size = artifact.get("size") or artifact.get("size_bytes")
-        if not isinstance(size, (int, float)):
-            path = Path(file_value)
-            if path.exists() and path.is_file():
-                size = path.stat().st_size
-        if isinstance(size, (int, float)) and size > max_file_size_mb * 1024 * 1024:
-            raise ValueError(f"产物超过 napcat.max_file_size_mb 限制：{size:.0f} bytes")
-
-    async def call_action(self, action: str, payload: Dict[str, Any]) -> Dict[str, Any]:
-        """调用一个 NapCat HTTP action。"""
-
-        response = await self._get_client().post(self._build_url(action), headers=self._headers(), json=payload)
-        response.raise_for_status()
-        data = response.json()
-        if not isinstance(data, dict):
-            raise ValueError(f"NapCat {action} 响应不是 JSON 对象")
-        status = data.get("status")
-        retcode = data.get("retcode")
-        if (status is not None and status != "ok") or (retcode is not None and retcode != 0):
-            message = data.get("message") or data.get("wording") or data
-            raise RuntimeError(f"NapCat {action} 失败：{message}")
         return data
 
 
@@ -641,7 +494,6 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
     def __init__(self) -> None:
         super().__init__()
         self._client = RemoteAgentClient(RemoteCodexAgentConfig())
-        self._napcat_client = NapCatUploadClient(RemoteCodexAgentConfig())
         self._tasks: Dict[str, RemoteTaskState] = {}
         self._cleanup_task: Optional[asyncio.Task[None]] = None
 
@@ -649,7 +501,6 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
         """插件加载时初始化运行态。"""
 
         self._client.update_config(self.config)
-        self._napcat_client.update_config(self.config)
         self._ensure_records_dirs()
         self._cleanup_expired_task_records()
         self._cleanup_expired_input_files()
@@ -673,16 +524,13 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
         if cleanup_task is not None:
             await asyncio.gather(cleanup_task, return_exceptions=True)
         await self._client.close()
-        await self._napcat_client.close()
 
     async def on_config_update(self, scope: str, config_data: Dict[str, object], version: str) -> None:
         """处理配置热重载。"""
 
         del scope, config_data, version
         await self._client.close()
-        await self._napcat_client.close()
         self._client.update_config(self.config)
-        self._napcat_client.update_config(self.config)
         self._restart_periodic_cleanup_task()
 
     def _restart_periodic_cleanup_task(self) -> None:
@@ -941,9 +789,9 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
             self.ctx.logger.info("已拒绝 QQ 群临时私聊 Codex 指令，未发送提示：缺少 user_id 或 NapCat 未启用")
             return
         try:
-            await self._napcat_client.call_action(
-                "send_private_msg",
-                {
+            await self._call_napcat_action(
+                "adapter.napcat.message.send_private_msg",
+                params={
                     "user_id": normalized_user_id,
                     "message": [{"type": "text", "data": {"text": message}}],
                 },
@@ -1782,16 +1630,15 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
         return imported_files
 
     async def _get_napcat_message(self, message_id: str) -> Any:
-        """通过 NapCat get_msg 获取原始 QQ 消息。"""
+        """通过 NapCat Adapter API 获取原始 QQ 消息。"""
 
         if not str(message_id or "").strip():
             return None
         try:
-            response = await self._napcat_client.call_action("get_msg", {"message_id": message_id})
+            return await self._call_napcat_api("adapter.napcat.message.get_msg", message_id=message_id)
         except Exception as exc:
             self.ctx.logger.warning("NapCat get_msg 获取被回复消息失败: %s", exc)
             return None
-        return response.get("data") if isinstance(response, dict) else response
 
     def _extract_reply_message_id(self, message: Any) -> str:
         """从命令消息中提取被回复消息 ID。"""
@@ -1923,11 +1770,10 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
             return data
 
         try:
-            response = await self._napcat_client.call_action("get_file", {"file_id": file_id})
+            response_data = await self._call_napcat_action("adapter.napcat.file.get_file", {"file_id": file_id})
         except Exception as exc:
             self.ctx.logger.warning("NapCat get_file 获取输入文件失败: %s", exc)
         else:
-            response_data = response.get("data")
             if isinstance(response_data, dict):
                 merged = dict(data)
                 merged.update(response_data)
@@ -1963,11 +1809,10 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
 
         for action, payload in candidates:
             try:
-                response = await self._napcat_client.call_action(action, payload)
+                response_data = await self._call_napcat_action(f"adapter.napcat.file.{action}", payload)
             except Exception as exc:
                 self.ctx.logger.warning("NapCat %s 获取输入文件 URL 失败: %s", action, exc)
                 continue
-            response_data = response.get("data")
             if isinstance(response_data, dict):
                 return response_data
         return {}
@@ -1995,13 +1840,11 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
     async def _download_input_file(self, url: str, target_path: Path) -> None:
         """下载输入文件到目标路径。"""
 
-        timeout = max(float(self.config.napcat.request_timeout_seconds), 1.0)
-        headers = {}
-        token = str(self.config.napcat.token or "").strip()
-        if token:
-            headers["Authorization"] = f"Bearer {token}"
+        timeout = max(float(self.config.input_file.download_timeout_seconds), 1.0)
         async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
-            async with client.stream("GET", url, headers=headers) as response:
+            # 下载地址可能来自 QQ 文件消息里的外部 URL，不能把 NapCat token
+            # 作为 Authorization 头转发给目标站点。
+            async with client.stream("GET", url) as response:
                 response.raise_for_status()
                 total = 0
                 with target_path.open("wb") as file:
@@ -2500,14 +2343,14 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
         """尝试向触发用户私聊发送任务文本。"""
 
         # 不通过 MaiBot stream_id 发私聊，因为临时私聊路由可能不稳定。
-        # 这里直接调用 NapCat HTTP API 的 send_private_msg。
+        # 这里通过 MaiBot SDK 调用 NapCat Adapter 的公开 API。
         user_id = str(task_state.private_progress_user_id or task_state.user_id or "").strip()
         if not task_state.private_progress or not user_id or not self.config.napcat.enabled:
             return False
         try:
-            await self._napcat_client.call_action(
-                "send_private_msg",
-                {
+            await self._call_napcat_action(
+                "adapter.napcat.message.send_private_msg",
+                params={
                     "user_id": user_id,
                     "message": [{"type": "text", "data": {"text": message}}],
                 },
@@ -2742,14 +2585,14 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
         artifacts: List[Dict[str, Any]],
         force_private: bool = False,
     ) -> None:
-        """通过 NapCat HTTP API 直传产物文件。"""
+        """通过 NapCat Adapter API 直传产物文件。"""
 
         failures: List[str] = []
         uncertain_failures: List[str] = []
         for artifact in artifacts:
             name = str(artifact.get("name") or artifact.get("filename") or "未命名产物").strip()
             try:
-                await self._napcat_client.upload_artifact(task_state, artifact, force_private=force_private)
+                await self._upload_artifact_via_napcat(task_state, artifact, force_private=force_private)
             except Exception as exc:
                 self.ctx.logger.warning("NapCat 文件直传失败: %s", exc)
                 failure_line = f"- {name}: {exc}"
@@ -2785,6 +2628,103 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
 
         message = str(exc).lower()
         return "timeout" in message and ("sendmsg" in message or "ntevent" in message)
+
+    async def _upload_artifact_via_napcat(
+        self,
+        task_state: RemoteTaskState,
+        artifact: Dict[str, Any],
+        force_private: bool = False,
+    ) -> Dict[str, Any]:
+        """上传单个产物到任务来源聊天或触发用户私聊。"""
+
+        file_value = self._extract_artifact_file_value(artifact)
+        name = self._extract_artifact_name(artifact, file_value)
+        self._check_artifact_upload_size(artifact, file_value)
+
+        group_id = str(task_state.group_id or "").strip()
+        user_id = str(task_state.user_id or "").strip()
+        if group_id and not force_private:
+            return await self._call_napcat_action(
+                "adapter.napcat.file.upload_group_file",
+                {
+                    "group_id": group_id,
+                    "file": file_value,
+                    "name": name,
+                    "upload_file": bool(self.config.napcat.upload_file),
+                },
+            )
+        if user_id:
+            return await self._call_napcat_action(
+                "adapter.napcat.file.upload_private_file",
+                {
+                    "user_id": user_id,
+                    "file": file_value,
+                    "name": name,
+                    "upload_file": bool(self.config.napcat.upload_file),
+                },
+            )
+        raise ValueError("无法获取当前聊天的 group_id 或 user_id，不能直传文件")
+
+    @staticmethod
+    def _extract_artifact_file_value(artifact: Dict[str, Any]) -> str:
+        """从产物信息中提取可交给 NapCat 的文件路径或 URL。"""
+
+        for key in ("path", "file", "url", "download_url"):
+            value = str(artifact.get(key) or "").strip()
+            if value:
+                return value
+        raise ValueError("产物缺少 path/file/url/download_url，无法直传")
+
+    @staticmethod
+    def _extract_artifact_name(artifact: Dict[str, Any], file_value: str) -> str:
+        """提取 QQ 文件显示名。"""
+
+        name = str(artifact.get("name") or artifact.get("filename") or "").strip()
+        if name:
+            return name
+        return Path(file_value).name or "codex_artifact"
+
+    def _check_artifact_upload_size(self, artifact: Dict[str, Any], file_value: str) -> None:
+        """检查单个产物是否超过直传大小限制。"""
+
+        max_file_size_mb = float(self.config.napcat.max_file_size_mb)
+        if max_file_size_mb <= 0:
+            return
+
+        size = artifact.get("size") or artifact.get("size_bytes")
+        if not isinstance(size, (int, float)):
+            path = Path(file_value)
+            if path.exists() and path.is_file():
+                size = path.stat().st_size
+        if isinstance(size, (int, float)) and size > max_file_size_mb * 1024 * 1024:
+            raise ValueError(f"产物超过 napcat.max_file_size_mb 限制：{size:.0f} bytes")
+
+    async def _call_napcat_api(self, api_name: str, **kwargs: Any) -> Any:
+        """通过 MaiBot SDK 调用 NapCat Adapter 公开 API，并拆出真实结果。"""
+
+        response = await self.ctx.api.call(api_name, **kwargs)
+        if not isinstance(response, dict):
+            raise RuntimeError(f"{api_name} 返回不是 SDK 标准响应：{response!r}")
+        if not response.get("success"):
+            message = response.get("error") or response.get("message") or response
+            raise RuntimeError(f"{api_name} 调用失败：{message}")
+        return response.get("result")
+
+    async def _call_napcat_action(self, api_name: str, params: Dict[str, Any]) -> Dict[str, Any]:
+        """调用 NapCat 透传 action，并把原始响应中的 data 作为成功结果返回。"""
+
+        result = await self._call_napcat_api(api_name, params=params)
+        if not isinstance(result, dict):
+            raise RuntimeError(f"{api_name} 响应不是 JSON 对象")
+
+        status = result.get("status")
+        retcode = result.get("retcode")
+        if (status is not None and status != "ok") or (retcode is not None and retcode != 0):
+            message = result.get("message") or result.get("wording") or result
+            raise RuntimeError(f"{api_name} 执行失败：{message}")
+
+        data = result.get("data")
+        return data if isinstance(data, dict) else result
 
     async def _handle_status(self, stream_id: str, task_id: str) -> None:
         """处理任务状态查询命令。"""

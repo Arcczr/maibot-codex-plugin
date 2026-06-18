@@ -53,7 +53,7 @@ Assume the target machine already has:
 - the same Python environment that starts MaiBot
 - `uv` if MaiBot is normally started with `uv run bot.py`
 - network access required by Codex CLI
-- optional network access to NapCat HTTP API
+- NapCat Adapter loaded if QQ file upload/download integration is needed
 
 The plugin requires the Python package:
 
@@ -266,38 +266,26 @@ require a MaiBot restart depending on the host configuration loader.
 ## NapCat Artifact Upload
 
 NapCat direct upload is optional but recommended when QQ users should receive
-files directly instead of server-local paths.
-
-Same-host NapCat HTTP Server example:
-
-```text
-host: 127.0.0.1
-port: 9998
-token: empty or configured by operator
-```
+files directly instead of only seeing artifact names. The plugin uses MaiBot
+SDK `api.call` to call NapCat Adapter public APIs; do not configure NapCat HTTP
+host, port, or token in this plugin.
 
 Plugin config:
 
 ```toml
 [napcat]
 enabled = true
-scheme = "http"
-host = "127.0.0.1"
-port = 9998
-token = ""
-request_timeout_seconds = 120.0
 upload_file = true
 max_file_size_mb = 100.0
 ```
 
 The plugin calls:
 
-- `upload_group_file` for group chats
-- `upload_private_file` for private chats
+- `adapter.napcat.file.upload_group_file` for group chats
+- `adapter.napcat.file.upload_private_file` for private chats
 
 If MaiBot and NapCat run in separate containers or machines:
 
-- `host` must be reachable from MaiBot.
 - The returned artifact path must be readable by the NapCat process, or the
   deployment must use an upload path/API that supports the file location.
 - Use shared volumes when both services are containerized.
@@ -456,7 +444,7 @@ If Codex task creation fails:
 
 If NapCat artifact upload fails:
 
-- Check NapCat HTTP server host, port, and token.
+- Check that MaiBot loaded NapCat Adapter and the plugin manifest has `api.call`.
 - Check `napcat.upload_file = true`.
 - Check file path visibility between MaiBot and NapCat.
 - Check `napcat.max_file_size_mb`.
@@ -466,7 +454,7 @@ If reply-file input fails:
 
 - Confirm the command replied to the file message.
 - Confirm `input_file.enable_reply_file = true`.
-- Confirm NapCat HTTP API is configured if only `file_id` is available.
+- Confirm `napcat.enabled = true` and NapCat Adapter public APIs are available if only `file_id` is present.
 - Confirm MaiBot can read the returned local file path or download URL.
 - For containers, confirm shared volumes or URL access.
 

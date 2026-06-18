@@ -303,6 +303,7 @@ max_file_size_mb = 100.0
 auto_cleanup_input_files = true
 input_file_ttl_hours = 24.0
 allow_url_download = true
+download_timeout_seconds = 120.0
 allowed_local_roots = []
 ```
 
@@ -310,7 +311,7 @@ allowed_local_roots = []
 
 - 插件不会自动猜“最近上传的文件”，必须回复具体文件消息。
 - Word、PPT、Excel、PDF、Markdown、TXT、ZIP 等文件都可以作为材料传入，最终能否正确读取取决于 Codex 环境中可用的解析工具。
-- 如果 QQ 文件消息只有 `file_id`，通常需要配置 NapCat HTTP API，让插件调用 `get_file` 获取文件路径或下载地址。
+- 如果 QQ 文件消息只有 `file_id`，需要启用 `napcat.enabled`，让插件通过 MaiBot SDK 调用 NapCat Adapter 的 `get_file` 等公开 API 补全路径或下载地址。
 - 如果 MaiBot 和 NapCat 不在同一个文件系统里，需要用共享卷或 URL 方式让 MaiBot 读到文件。
 - 输入材料会放在 `workspace/input/`，可按 `input_file_ttl_hours` 自动清理；清理输入材料不会删除产物、日志或 task 记录。
 
@@ -343,30 +344,19 @@ workspace/artifacts/slides.pptx
 
 ## NapCat 直传文件
 
-如果只使用默认产物链接，群里看到的可能是服务器本地路径。要让 QQ 群直接收到文件，建议启用 NapCat HTTP API 直传。
+如果只使用默认产物列表，群里只会看到文件名和大小。要让 QQ 群直接收到文件，建议启用 NapCat Adapter API 直传。
 
-### NapCat 侧配置
+### 前置条件
 
-在 NapCat WebUI 中为当前 bot 新增 HTTP Server：
+MaiBot 需要加载 NapCat Adapter，且当前插件 manifest 需要声明 `api.call` 能力。插件不再保存 NapCat 服务地址或 token。
 
-```text
-host: 127.0.0.1
-port: 9998
-token: 可留空，也可以自行设置
-```
-
-如果 MaiBot 和 NapCat 不在同一台机器，`host` 要填 MaiBot 能访问到的 NapCat 地址，并确保端口、防火墙和容器网络可通。
+如果 MaiBot 和 NapCat 不在同一个文件系统里，产物路径必须是 NapCat 进程也能读取的路径，容器部署时通常需要共享卷。
 
 ### 插件侧配置
 
 ```toml
 [napcat]
 enabled = true
-scheme = "http"
-host = "127.0.0.1"
-port = 9998
-token = ""
-request_timeout_seconds = 120.0
 upload_file = true
 max_file_size_mb = 100.0
 ```
@@ -615,11 +605,10 @@ codex -a never exec --json --color never -s workspace-write --skip-git-repo-chec
 
 检查：
 
-- NapCat HTTP Server 是否开启。
-- `host`、`port`、`token` 是否和插件配置一致。
-- MaiBot 机器是否能访问 NapCat 端口。
+- MaiBot 是否加载了 NapCat Adapter。
+- manifest 是否声明了 `api.call` 能力。
 - `napcat.upload_file = true`。
-- 产物文件路径是否是 NapCat 能读取的本机路径。
+- 产物文件路径是否是 NapCat 进程能读取的本机路径或共享卷路径。
 - 文件大小是否超过 `napcat.max_file_size_mb`。
 
 ### 回复文件没有被读取
@@ -628,7 +617,7 @@ codex -a never exec --json --color never -s workspace-write --skip-git-repo-chec
 
 - 是否是“回复文件消息”发送 `/codex`，不是单独发送 `/codex`。
 - `input_file.enable_reply_file = true`。
-- 如果文件消息只有 `file_id`，NapCat HTTP API 是否可用。
+- 如果文件消息只有 `file_id`，`napcat.enabled` 是否开启，NapCat Adapter 公开 API 是否可用。
 - MaiBot 是否有权限读取 NapCat 返回的本地文件路径。
 - 容器部署时是否配置了共享卷。
 

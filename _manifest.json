@@ -2,7 +2,7 @@
   "manifest_version": 2,
   "version": "0.5.0",
   "name": "Codex CLI QQ 调度器",
-  "description": "通过 QQ 命令在 MaiBot 所在服务器上运行 Codex CLI，并可通过 NapCat HTTP API 将产物文件直传回当前聊天流；也保留远程 HTTP Agent 模式。",
+  "description": "通过 QQ 命令在 MaiBot 所在服务器上运行 Codex CLI，并可通过 NapCat Adapter API 将产物文件直传回当前聊天流；也保留远程 HTTP Agent 模式。",
   "author": {
     "name": "Arcczr",
     "url": "https://github.com/Arcczr"
@@ -38,6 +38,7 @@
     }
   },
   "capabilities": [
+    "api.call",
     "send.text",
     "send.custom",
     "message.get_by_id"
