@@ -102,7 +102,7 @@ execution_mode = "local"
 
 [local_codex]
 codex_binary = "codex"
-work_root = "data/remote_codex_agent/tasks"
+work_root = "data/tasks"
 sandbox = "workspace-write"
 approval_policy = "never"
 ```
@@ -452,9 +452,9 @@ codex -a never exec \
   --json \
   --color never \
   -s workspace-write \
-  -C data/remote_codex_agent/tasks/<task_id>/workspace \
+  -C data/tasks/<task_id>/workspace \
   --skip-git-repo-check \
-  --output-last-message data/remote_codex_agent/tasks/<task_id>/final.md \
+  --output-last-message data/tasks/<task_id>/final.md \
   -
 ```
 
@@ -463,7 +463,7 @@ codex -a never exec \
 每个任务目录类似：
 
 ```text
-data/remote_codex_agent/tasks/<task_id>/
+data/tasks/<task_id>/
   prompt.md
   stdout.jsonl
   stderr.log
@@ -476,7 +476,7 @@ data/remote_codex_agent/tasks/<task_id>/
 持久记录在：
 
 ```text
-data/remote_codex_agent/tasks/_records/
+data/tasks/_records/
 ```
 
 这些运行时目录不应该提交到 Git。
@@ -631,7 +631,7 @@ codex -a never exec --json --color never -s workspace-write --skip-git-repo-chec
 
 - 不要长期对所有用户开放，优先使用 `allowed_users` 和 `allowed_groups`。
 - 默认使用 `workspace-write` 沙箱，不要随意开放 `danger-full-access`。
-- `work_root` 使用专用目录，不要指向 MaiBot 主仓库或系统关键目录。
+- `work_root` 默认使用插件目录的 `data/tasks`；不建议改到默认目录以外，可能存在安全和误删风险，除非你知道自己在做什么。
 - 控制任务超时、文件大小、进度长度和摘要长度。
 - 用户上传的文件可能包含隐私或敏感信息，只允许可信用户触发。
 - 不要把完整群聊历史默认交给 Codex。

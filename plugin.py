@@ -110,7 +110,7 @@ class LocalCodexConfig(PluginConfigBase):
     __ui_order__: ClassVar[int] = 4
 
     codex_binary: str = Field(default="codex", description="Codex CLI 可执行文件名或绝对路径")
-    work_root: str = Field(default="data/remote_codex_agent/tasks", description="本地任务根目录")
+    work_root: str = Field(default="data/tasks", description="本地任务根目录；相对路径按插件目录解析")
     sandbox: str = Field(default="workspace-write", description="Codex CLI 沙箱模式")
     approval_policy: str = Field(default="never", description="Codex CLI 审批策略")
     model: str = Field(default="", description="可选模型名")
@@ -179,7 +179,7 @@ class InputFileConfig(PluginConfigBase):
     max_files_per_task: int = Field(default=5, description="单个任务最多导入多少个文件")
     max_file_size_mb: float = Field(default=100.0, description="单个输入文件最大大小，0 表示不限制")
     allow_url_download: bool = Field(default=True, description="是否允许从 QQ 文件消息中的 HTTP URL 下载输入文件")
-    allowed_local_roots: List[str] = Field(default_factory=list, description="允许复制的本地文件根目录，空列表表示不限制")
+    allowed_local_roots: List[str] = Field(default_factory=list, description="允许复制的本地文件根目录，空列表表示禁止复制本地路径")
     auto_cleanup_input_files: bool = Field(default=True, description="启动时是否自动清理过期输入材料")
     input_file_ttl_hours: float = Field(default=24.0, description="输入材料保留小时数，0 表示不自动清理")
 
@@ -492,6 +492,20 @@ def _plain_qq_text(text: str) -> str:
     return "\n".join(line for line in lines if line).strip()
 
 
+def _sanitize_path_text(text: str, replacements: Dict[str, str]) -> str:
+    """把面向用户的文本中的本机绝对路径替换为相对描述。"""
+
+    cleaned = str(text or "")
+    ordered_items = sorted(
+        ((str(source or ""), str(target or "")) for source, target in replacements.items() if str(source or "")),
+        key=lambda item: len(item[0]),
+        reverse=True,
+    )
+    for source, target in ordered_items:
+        cleaned = cleaned.replace(source, target)
+    return re.sub(r"/[^\s，。；：、]+/workspace/artifacts/([^\s，。；：、]+)", r"workspace/artifacts/\1", cleaned)
+
+
 def _format_progress_message(task_id: str, progress_lines: List[str], max_chars: int) -> str:
     """格式化 QQ 进度消息。"""
 
@@ -789,6 +803,11 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
             await self.ctx.send.text(limit_error, stream_id)
             return False, limit_error, True
 
+        path_error = self._check_prompt_local_path_access(command_body)
+        if path_error:
+            await self.ctx.send.text(path_error, stream_id)
+            return False, path_error, True
+
         if execution_mode == "local":
             dangerous_error = self._check_dangerous_local_permission(platform=platform, user_id=user_id)
             if dangerous_error:
@@ -868,6 +887,44 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
         if dangerous and not self._is_admin_user(platform, user_id):
             return "当前 Codex 配置使用高危权限，仅管理员可以触发任务。"
         return ""
+
+    def _check_prompt_local_path_access(self, prompt: str) -> str:
+        """限制通过自然语言任务直接读取服务器本地绝对路径。"""
+
+        paths = self._extract_local_path_mentions(prompt)
+        if not paths:
+            return ""
+        if all(self._is_allowed_local_path_text(path) for path in paths):
+            return ""
+        return "为避免读取服务器敏感文件，当前不接受任务描述中的本地路径。请上传 QQ 文件并回复它使用 /codex，或由管理员配置允许读取的本地根目录。"
+
+    @staticmethod
+    def _extract_local_path_mentions(text: str) -> List[str]:
+        """从文本中提取看起来像本机路径的片段。"""
+
+        pattern = r"(?<![\w:])(?:file://)?(?:~|\.\.|/(?:root|home|etc|var|usr|opt|tmp|mnt|srv|data|www|run|proc|sys|dev))(?:/[^\s，。；：、]+)?"
+        return re.findall(pattern, str(text or ""))
+
+    def _is_allowed_local_path_text(self, path_text: str) -> bool:
+        """判断任务描述中的本地路径是否落在允许目录内。"""
+
+        roots = [str(root or "").strip() for root in self.config.input_file.allowed_local_roots if str(root or "").strip()]
+        if not roots:
+            return False
+        try:
+            candidate = self._normalize_local_file_path(path_text).resolve()
+        except OSError:
+            return False
+        for root in roots:
+            root_path = Path(root).expanduser()
+            if not root_path.is_absolute():
+                root_path = self._plugin_dir() / root_path
+            try:
+                candidate.relative_to(root_path.resolve())
+                return True
+            except (OSError, ValueError):
+                continue
+        return False
 
     def _is_admin_user(self, platform: str, user_id: str) -> bool:
         """判断用户是否是插件管理员。"""
@@ -1047,8 +1104,6 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
         """创建本地任务目录和 prompt 文件。"""
 
         work_root = self._local_work_root()
-        if not work_root.is_absolute():
-            work_root = Path.cwd() / work_root
         task_dir = work_root / task_id
         workspace_dir = task_dir / "workspace"
         task_dir.mkdir(parents=True, exist_ok=False)
@@ -1061,15 +1116,21 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
     def _local_work_root(self) -> Path:
         """返回本地 Codex 工作根目录。"""
 
-        return Path(self.config.local_codex.work_root).expanduser()
+        work_root = Path(self.config.local_codex.work_root).expanduser()
+        if not work_root.is_absolute():
+            work_root = self._plugin_dir() / work_root
+        return work_root
 
     def _records_root(self) -> Path:
         """返回插件持久记录目录。"""
 
-        work_root = self._local_work_root()
-        if not work_root.is_absolute():
-            work_root = Path.cwd() / work_root
-        return work_root / "_records"
+        return self._local_work_root() / "_records"
+
+    @staticmethod
+    def _plugin_dir() -> Path:
+        """返回插件目录。"""
+
+        return Path(__file__).resolve().parent
 
     def _task_records_dir(self) -> Path:
         return self._records_root() / "tasks"
@@ -1326,12 +1387,12 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
                 continue
             raw_path = str(item.get("path") or "").strip()
             if raw_path:
-                candidate_files.append(Path(raw_path).expanduser())
+                candidate_files.append(self._resolve_stored_path(raw_path))
 
         workspace_dir = str(record.get("workspace_dir") or "").strip()
         input_dir: Optional[Path] = None
         if workspace_dir:
-            input_dir = Path(workspace_dir).expanduser() / input_dir_name
+            input_dir = self._resolve_stored_path(workspace_dir) / input_dir_name
             if not candidate_files and input_dir.exists():
                 candidate_files.extend(path for path in input_dir.iterdir() if path.is_file())
 
@@ -1381,7 +1442,7 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
         workspace_dir = str(record.get("workspace_dir") or "").strip()
         candidates = []
         if workspace_dir:
-            workspace_path = Path(workspace_dir).expanduser()
+            workspace_path = self._resolve_stored_path(workspace_dir)
             candidates.append(workspace_path.parent if workspace_path.name == "workspace" else workspace_path)
         if task_id:
             candidates.append(self._task_dir_for_id(task_id))
@@ -1402,6 +1463,14 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
             except OSError:
                 continue
         return False
+
+    def _resolve_stored_path(self, path_value: str) -> Path:
+        """解析记录中的路径，兼容绝对路径和相对插件目录路径。"""
+
+        path = Path(str(path_value or "")).expanduser()
+        if path.is_absolute():
+            return path
+        return self._plugin_dir() / path
 
     def _delete_task_record_by_id(self, task_id: str, delete_workspace: bool = True) -> tuple[bool, bool]:
         """删除 task 记录和可选 workspace。"""
@@ -1478,11 +1547,11 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
     def _build_local_codex_prompt(self, prompt: str, input_files: List[InputFile]) -> str:
         """构造发给本机 Codex CLI 的 prompt。"""
 
+        input_dir_name = self._safe_dir_name(self.config.input_file.input_dir_name or "input")
         input_text = ""
         if input_files:
-            input_dir_name = self._safe_dir_name(self.config.input_file.input_dir_name or "input")
             lines = [
-                f"用户上传的参考文件已经放在当前 workspace/{input_dir_name}/ 目录下。",
+                f"用户上传的参考文件已经放在当前工作目录的 {input_dir_name}/ 目录下。",
                 f"请优先读取这些文件并按用户任务处理；不要把 {input_dir_name}/ 中的原始材料当作最终产物回传。",
                 "输入文件：",
             ]
@@ -1494,10 +1563,11 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
 
         return (
             "你正在由 QQ 群中的 MaiBot 插件触发执行任务。\n"
-            "请在当前 workspace 内完成用户请求；如需生成文件，请放在 workspace/artifacts/ 下。\n"
+            "请只在当前工作目录内完成用户请求；如需生成文件，请放在 artifacts/ 下。\n"
+            "不要读取当前工作目录之外的服务器文件；除非输入文件列表明确提供了材料，否则不要尝试访问外部本地路径。\n"
             "如果用户要求 Word/word/docx 文档，必须生成 .docx 文件，不能只生成 Markdown 或纯文本替代品。\n"
             "所有面向用户的进度更新和最终回答都必须使用简体中文，语气简洁，不要输出 Markdown 格式。\n"
-            "最终回答请用简体中文，简要说明完成内容和产物路径。\n\n"
+            "最终回答请用简体中文，简要说明完成内容和产物文件名；不要输出服务器绝对路径。\n\n"
             f"{input_text}"
             f"用户任务：\n{prompt.strip()}\n"
         )
@@ -1777,11 +1847,14 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
 
         roots = [str(root or "").strip() for root in self.config.input_file.allowed_local_roots if str(root or "").strip()]
         if not roots:
-            return
+            raise RuntimeError("当前未允许读取服务器本地路径。请使用 QQ 文件上传，或由管理员配置 input_file.allowed_local_roots。")
 
         resolved_source = source_path.resolve()
         for root in roots:
-            resolved_root = Path(root).expanduser().resolve()
+            root_path = Path(root).expanduser()
+            if not root_path.is_absolute():
+                root_path = self._plugin_dir() / root_path
+            resolved_root = root_path.resolve()
             try:
                 resolved_source.relative_to(resolved_root)
                 return
@@ -2193,6 +2266,38 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
             return ""
         return cleaned
 
+    def _path_redactions_for_task(self, task_state: RemoteTaskState) -> Dict[str, str]:
+        """构造面向用户输出的路径替换表。"""
+
+        replacements: Dict[str, str] = {}
+        try:
+            plugin_dir = self._plugin_dir().resolve()
+            replacements[str(plugin_dir)] = "remote_codex_agent"
+        except OSError:
+            pass
+        try:
+            work_root = self._local_work_root().resolve()
+            replacements[str(work_root)] = "data/tasks"
+        except OSError:
+            pass
+        workspace_dir = str(task_state.workspace_dir or "").strip()
+        if workspace_dir:
+            try:
+                workspace_path = self._resolve_stored_path(workspace_dir).resolve()
+                replacements[str(workspace_path)] = "workspace"
+                replacements[str(workspace_path / "artifacts")] = "workspace/artifacts"
+                replacements[str(workspace_path / self._safe_dir_name(self.config.input_file.input_dir_name or "input"))] = "workspace/input"
+            except OSError:
+                pass
+        if task_state.task_id:
+            replacements[f"data/tasks/{task_state.task_id}/workspace"] = "workspace"
+        return replacements
+
+    def _sanitize_task_output_text(self, task_state: RemoteTaskState, text: str) -> str:
+        """清理任务输出中不应暴露给 QQ 用户的本机路径。"""
+
+        return _sanitize_path_text(text, self._path_redactions_for_task(task_state))
+
     async def _send_local_progress(self, task_state: RemoteTaskState, progress_text: str) -> None:
         """按节流规则发送本机任务进度。"""
 
@@ -2208,6 +2313,7 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
         task_state.sent_progress_ids.add(progress_id)
         task_state.last_progress_sent_at = now
         max_chars = max(int(self.config.progress.max_progress_item_chars), 20)
+        progress_text = self._sanitize_task_output_text(task_state, progress_text)
         message = _format_progress_message(task_state.task_id, [progress_text], max_chars)
         await self.ctx.send.text(message, task_state.stream_id)
 
@@ -2345,9 +2451,11 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
 
         lines = [f"{_display_task_kind(task_state.task_id)} {task_state.task_id} {status_text}。"]
         if summary:
-            lines.append(_truncate_text(_plain_qq_text(summary), max(int(self.config.progress.max_summary_chars), 100)))
+            sanitized_summary = self._sanitize_task_output_text(task_state, summary)
+            lines.append(_truncate_text(_plain_qq_text(sanitized_summary), max(int(self.config.progress.max_summary_chars), 100)))
         if error:
-            lines.append(f"错误：{_truncate_text(_plain_qq_text(error), 800)}")
+            sanitized_error = self._sanitize_task_output_text(task_state, error)
+            lines.append(f"错误：{_truncate_text(_plain_qq_text(sanitized_error), 800)}")
 
         artifacts = _coerce_artifacts(data.get("artifacts") or data.get("files") or data.get("artifact"))
         if self.config.artifact.send_artifact_links and artifacts:
@@ -2643,6 +2751,12 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
             f"联网搜索：{'启用' if self.config.local_codex.enable_search else '停用'}",
             f"进度转发：{'启用' if self.config.progress.forward_progress else '停用'}",
             f"NapCat 直传：{'启用' if self.config.napcat.enabled else '停用'}",
+            f"启动清理 task 记录：{'启用' if self.config.task.auto_cleanup_task_records else '停用'}",
+            f"自动清理 task 文件：{'启用' if self.config.task.auto_cleanup_task_workspaces else '停用'}",
+            f"定时清理：{'启用' if self.config.task.enable_periodic_cleanup else '停用'}",
+            f"定时清理间隔：{self.config.task.periodic_cleanup_interval_minutes} 分钟",
+            f"输入材料自动清理：{'启用' if self.config.input_file.auto_cleanup_input_files else '停用'}",
+            f"输入材料 TTL：{self.config.input_file.input_file_ttl_hours} 小时",
         ]
         if local_model:
             lines.append("说明：模型来自插件 local_codex.model。")
@@ -2868,6 +2982,10 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
         if not session_name or not prompt:
             await self.ctx.send.text("用法：/codex session <会话名> <任务描述>", stream_id)
             return False, "session 参数不足"
+        path_error = self._check_prompt_local_path_access(prompt)
+        if path_error:
+            await self.ctx.send.text(path_error, stream_id)
+            return False, path_error
         if self._load_session_record(session_name):
             await self.ctx.send.text(f"session 已存在：{session_name}\n继续它：/codex continue {prompt}", stream_id)
             return False, "session 已存在"
@@ -2909,6 +3027,10 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
         if not prompt.strip():
             await self.ctx.send.text("用法：/codex continue <继续处理的要求>", stream_id)
             return False, "continue 缺少要求"
+        path_error = self._check_prompt_local_path_access(prompt)
+        if path_error:
+            await self.ctx.send.text(path_error, stream_id)
+            return False, path_error
 
         scoped_user = self._build_scoped_user(platform, user_id)
         sessions = self._list_session_records(stream_id=stream_id, scoped_user=scoped_user, limit=1)
@@ -2959,6 +3081,10 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
             return False, "resume 参数不足"
 
         target, prompt = parts[0], parts[1].strip()
+        path_error = self._check_prompt_local_path_access(prompt)
+        if path_error:
+            await self.ctx.send.text(path_error, stream_id)
+            return False, path_error
         record = self._resolve_resume_record(target)
         thread_id = str((record or {}).get("codex_thread_id") or "").strip()
         if not thread_id and self._looks_like_thread_id(target):
@@ -3290,6 +3416,10 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
             f"{escaped_prefix} status <task_id> 查看指定任务\n"
             f"{escaped_prefix} cancel <task_id> 取消指定任务\n"
             f"{escaped_prefix} clean 管理员清理过期 task\n"
+            f"{escaped_prefix} clean input 管理员清理过期输入材料\n"
+            f"{escaped_prefix} clean task <task_id> 管理员删除指定 task 记录和文件\n"
+            f"{escaped_prefix} clean session <会话名> 管理员查看 session 删除影响\n"
+            f"{escaped_prefix} clean session <会话名> confirm 管理员确认删除 session 和关联文件\n"
             f"{escaped_prefix} skills 查看可用 Codex skills\n"
             f"{escaped_prefix} mcp 查看当前 Codex MCP 服务器\n"
             f"{escaped_prefix} config 查看当前模型和运行配置\n"

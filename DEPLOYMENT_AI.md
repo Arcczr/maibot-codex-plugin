@@ -171,7 +171,7 @@ periodic_cleanup_interval_minutes = 60.0
 
 [local_codex]
 codex_binary = "codex"
-work_root = "data/remote_codex_agent/tasks"
+work_root = "data/tasks"
 sandbox = "workspace-write"
 approval_policy = "never"
 model = ""
@@ -196,8 +196,9 @@ Important choices:
   `/codex clean`.
 - Use `workspace-write` by default.
 - Use `danger-full-access` only on isolated hosts and only for admin users.
-- `work_root` is relative to the MaiBot process working directory when not
-  absolute.
+- `work_root` is relative to the plugin directory when not
+  absolute. Do not change it away from the default directory unless the
+  operator accepts the safety and accidental deletion risks.
 
 ## Cleanup Configuration
 
@@ -319,7 +320,7 @@ to the file message.
 Default task root:
 
 ```text
-MaiBot/data/remote_codex_agent/tasks/
+MaiBot/plugins/remote_codex_agent/data/tasks/
 ```
 
 Per-task layout:
@@ -338,8 +339,8 @@ Per-task layout:
 Persistent records:
 
 ```text
-data/remote_codex_agent/tasks/_records/tasks/
-data/remote_codex_agent/tasks/_records/sessions/
+data/tasks/_records/tasks/
+data/tasks/_records/sessions/
 ```
 
 Normal task records can expire. Session records persist until admin cleanup.
