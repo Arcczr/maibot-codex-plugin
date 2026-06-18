@@ -1,7 +1,16 @@
 """Codex CLI QQ 调度插件。
 
-默认在 MaiBot 所在服务器上直接运行本机 Codex CLI。
-同时保留 remote 模式，用于后续对接独立 HTTP Agent 服务。
+这个文件是插件的主体实现，核心目标是把 QQ 里的 /codex 指令转换成一次
+Codex CLI 任务，并把进度、最终结果、产物文件回传到 QQ。
+
+默认走 local 模式：在 MaiBot 所在服务器上直接调用本机 Codex CLI。
+remote 模式保留给独立 HTTP Agent 服务，适合以后把执行机拆出去。
+
+几个容易踩坑的设计点：
+- QQ 不渲染 Markdown，所以所有发回 QQ 的文本都尽量压成纯文本。
+- QQ 群临时私聊在当前 adapter 路由里不稳定，可能把回复发回群里，因此默认拒绝作为命令入口。
+- /codex --dm 只表示“阶段性进度尝试私聊”，是否把创建提示、最终结果和产物也私聊由配置单独控制。
+- Codex 子进程只应该在任务 workspace 内工作，避免读取服务器上任意本地路径。
 """
 
 from dataclasses import dataclass, field
@@ -45,7 +54,7 @@ class PluginSectionConfig(PluginConfigBase):
     __ui_icon__: ClassVar[str] = "bot"
     __ui_order__: ClassVar[int] = 0
 
-    config_version: str = Field(default="0.3.0", description="配置版本号")
+    config_version: str = Field(default="0.5.0", description="配置版本号")
     enabled: bool = Field(default=True, description="是否启用插件")
 
 
@@ -73,12 +82,17 @@ class PermissionConfig(PluginConfigBase):
     __ui_icon__: ClassVar[str] = "shield"
     __ui_order__: ClassVar[int] = 2
 
+    # allow_all_users 是用户维度的总开关。开启后默认所有用户能用；
+    # 但 user_list_mode=blacklist 时，trigger_users 里的用户仍会被拦截。
+    # 关闭后必须进入旧 allowed_users 或新 trigger_users 白名单。
     allow_all_users: bool = Field(default=False, description="是否允许所有用户触发")
     allowed_users: List[str] = Field(default_factory=list, description="允许触发的用户，推荐格式 qq:用户ID")
     user_list_mode: str = Field(default="whitelist", description="用户列表模式：whitelist 或 blacklist")
     trigger_users: List[str] = Field(default_factory=list, description="用户黑白名单，推荐格式 qq:用户ID")
     admin_users: List[str] = Field(default_factory=list, description="管理员用户，允许使用高危权限")
     allowed_groups: List[str] = Field(default_factory=list, description="允许触发的群号、qq:群号 或 stream_id")
+    # “聊天流”是 MaiBot 对会话来源的抽象，可能是群、私聊或 adapter 生成的 stream_id。
+    # 用户权限和聊天流权限同时生效，两边都通过才允许触发。
     chat_list_mode: str = Field(default="whitelist", description="聊天流列表模式：whitelist 或 blacklist")
     trigger_chats: List[str] = Field(default_factory=list, description="聊天流黑白名单，可写群号、qq:群号 或 stream_id")
     reject_temporary_private_chat: bool = Field(default=True, description="是否拒绝 QQ 群临时私聊触发")
@@ -141,12 +155,16 @@ class ProgressConfig(PluginConfigBase):
     max_progress_items_per_message: int = Field(default=5, description="每次最多合并多少条进度")
     max_progress_item_chars: int = Field(default=300, description="单条进度最大字符数")
     max_summary_chars: int = Field(default=1800, description="最终摘要最大字符数")
+    # 私聊进度依赖 NapCat HTTP API 的 send_private_msg。
+    # QQ 侧通常要求用户先主动私聊过机器人，否则可能发送失败。
     enable_private_progress: bool = Field(default=False, description="是否允许用户用参数请求私聊接收阶段性进度")
     private_progress_trigger_args: List[str] = Field(
         default_factory=lambda: ["--dm", "--private-progress"],
         description="触发私聊进度的命令参数",
     )
     private_progress_fallback_to_origin: bool = Field(default=True, description="私聊进度发送失败时是否回退到原聊天流")
+    private_progress_send_task_created: bool = Field(default=False, description="使用私聊进度时是否把任务创建提示也私聊发送")
+    private_progress_send_artifacts: bool = Field(default=False, description="使用私聊进度时是否把最终结果和产物也私聊发送")
 
 
 class ArtifactConfig(PluginConfigBase):
@@ -383,16 +401,23 @@ class NapCatUploadClient:
             headers["Authorization"] = f"Bearer {token}"
         return headers
 
-    async def upload_artifact(self, task_state: RemoteTaskState, artifact: Dict[str, Any]) -> Dict[str, Any]:
+    async def upload_artifact(
+        self,
+        task_state: RemoteTaskState,
+        artifact: Dict[str, Any],
+        force_private: bool = False,
+    ) -> Dict[str, Any]:
         """上传一个产物到当前 QQ 群聊或私聊。"""
 
         file_value = self._extract_file_value(artifact)
         name = self._extract_name(artifact, file_value)
         self._check_file_size(artifact, file_value)
 
+        # 默认产物回到任务来源：群里触发就发群文件，私聊触发就发私聊文件。
+        # force_private 用于 /codex --dm 且配置要求“产物也私聊”的场景。
         group_id = str(task_state.group_id or "").strip()
         user_id = str(task_state.user_id or "").strip()
-        if group_id:
+        if group_id and not force_private:
             action = "upload_group_file"
             payload: Dict[str, Any] = {
                 "group_id": group_id,
@@ -726,6 +751,9 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
             return False, "无法获取当前聊天流 ID", True
 
         command_message = kwargs.get("message")
+        # 群临时私聊在当前 NapCat adapter 里会带 private 类型，但同时携带 group_id。
+        # 如果继续使用 ctx.send.text(stream_id)，回复可能被送回群聊。这里直接拒绝作为命令入口。
+        # 提示消息也尽量走 NapCat 私聊，失败就静默，只在日志里留痕，避免再次污染群聊。
         if self.config.permission.reject_temporary_private_chat and self._is_temporary_private_chat(command_message):
             message = "当前是 QQ 群临时会话，消息路由可能不稳定。请在群聊中使用 /codex，或先主动私聊机器人后再使用。"
             await self._try_send_private_notice(user_id, message)
@@ -805,6 +833,8 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
             )
             return handled, message, True
 
+        # 普通任务创建才在这里解析 --dm。session/continue/resume 在各自处理器里解析，
+        # 这样可以把 --dm 从真正发给 Codex 的 prompt 里剥离掉，避免 Codex 把它当任务文本。
         parsed_prompt, private_progress = self._parse_private_progress_args(command_body)
         if not parsed_prompt:
             await self.ctx.send.text("用法：/codex --dm <任务描述>", stream_id)
@@ -882,6 +912,8 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
     def _is_temporary_private_chat(message: Any) -> bool:
         """判断是否是 QQ 群临时私聊。"""
 
+        # 命令桥传给插件的 message 可能是 SessionMessage 对象，也可能已经序列化成 dict。
+        # 两种结构都要支持，否则临时私聊拦截会漏掉。
         if isinstance(message, dict):
             message_info = message.get("message_info") if isinstance(message.get("message_info"), dict) else {}
             additional_config = message_info.get("additional_config") if isinstance(message_info, dict) else {}
@@ -952,6 +984,9 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
         if normalized_platform and normalized_user_id:
             user_candidates.add(f"{normalized_platform}:{normalized_user_id}")
 
+        # 用户名单和聊天流名单是两道门：谁能用、在哪里能用。
+        # allow_all_users=false 时，用户必须在白名单里；allow_all_users=true 时，
+        # 仍然可以用 trigger_users 的 blacklist 模式单独封禁某些用户。
         legacy_allowed_users = _normalize_set(permission.allowed_users)
         trigger_users = _normalize_set(permission.trigger_users)
         user_list_mode = self._normalize_list_mode(permission.user_list_mode)
@@ -964,6 +999,8 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
         elif user_list_mode == "blacklist" and trigger_users and not trigger_users.isdisjoint(user_candidates):
             return "你没有权限触发远程 Codex Agent。"
 
+        # 旧 allowed_groups 继续当白名单用，避免老配置升级后失效。
+        # 新 trigger_chats 支持 whitelist/blacklist，两者都会参与判断。
         chat_candidates = self._build_chat_candidates(normalized_platform, normalized_group_id, normalized_stream_id)
         legacy_allowed_groups = _normalize_set(permission.allowed_groups)
         if legacy_allowed_groups:
@@ -1149,7 +1186,7 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
             reply = f"{reply}\n阶段性进度将尝试私聊发送给你。"
         if remote_message:
             reply = f"{reply}\n{remote_message}"
-        await self.ctx.send.text(reply, stream_id)
+        await self._send_task_created_message(task_state, reply)
         return True, f"远程任务已创建: {task_id}", True
 
     async def _create_local_task(
@@ -1226,7 +1263,7 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
             created_message = f"{created_message}\n已导入参考文件：{names}"
         if private_progress:
             created_message = f"{created_message}\n阶段性进度将尝试私聊发送给你。"
-        await self.ctx.send.text(created_message, stream_id)
+        await self._send_task_created_message(task_state, created_message)
         return True, f"本机任务已创建: {task_id}", True
 
     def _prepare_local_task_files(self, task_id: str, prompt: str) -> tuple[Path, Path, Path, Path]:
@@ -1691,6 +1728,9 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
             input_text = "\n".join(lines) + "\n\n"
 
         return (
+            # 这段提示词是插件给 Codex CLI 的“运行边界”。
+            # 重点是限制它只在 workspace 内工作，并要求最终产物放到 artifacts/，
+            # 这样插件后续才能稳定扫描和回传文件。
             "你正在由 QQ 群中的 MaiBot 插件触发执行任务。\n"
             "请只在当前工作目录内完成用户请求；如需生成文件，请放在 artifacts/ 下。\n"
             "不要读取当前工作目录之外的服务器文件；除非输入文件列表明确提供了材料，否则不要尝试访问外部本地路径。\n"
@@ -1723,6 +1763,8 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
         except Exception as exc:
             raise RuntimeError(f"无法读取被回复的消息：{exc}") from exc
 
+        # 优先用 MaiBot 自己的 message.get_by_id 读取被回复消息。
+        # 如果 SDK 返回的消息里没有文件段，再退回 NapCat get_msg 读取原始 QQ 消息。
         file_segments = self._extract_file_segments(reply_message)
         if not file_segments:
             napcat_message = await self._get_napcat_message(reply_message_id)
@@ -2449,26 +2491,50 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
     async def _send_progress_text(self, task_state: RemoteTaskState, message: str) -> None:
         """按任务设置发送进度消息。"""
 
-        if task_state.private_progress and task_state.private_progress_user_id and self.config.napcat.enabled:
-            try:
-                await self._napcat_client.call_action(
-                    "send_private_msg",
-                    {
-                        "user_id": task_state.private_progress_user_id,
-                        "message": [{"type": "text", "data": {"text": message}}],
-                    },
-                )
+        if task_state.private_progress:
+            # --dm 的核心行为只影响阶段性进度：先尝试私聊触发用户。
+            # 失败后只提醒一次，避免每条进度都刷屏报告失败。
+            if await self._try_send_private_task_text(task_state, message, log_prefix="Codex 私聊进度发送失败"):
                 return
-            except Exception as exc:
-                self.ctx.logger.warning("Codex 私聊进度发送失败: %s", exc)
-                if not task_state.private_progress_failure_notified:
-                    task_state.private_progress_failure_notified = True
-                    notice = f"任务 {task_state.task_id} 私聊进度发送失败，后续进度将发回当前聊天。"
-                    if self.config.progress.private_progress_fallback_to_origin:
-                        await self.ctx.send.text(notice, task_state.stream_id)
+            if not task_state.private_progress_failure_notified:
+                task_state.private_progress_failure_notified = True
+                notice = f"任务 {task_state.task_id} 私聊进度发送失败，后续进度将发回当前聊天。"
+                if self.config.progress.private_progress_fallback_to_origin:
+                    await self.ctx.send.text(notice, task_state.stream_id)
 
         if self.config.progress.private_progress_fallback_to_origin or not task_state.private_progress:
             await self.ctx.send.text(message, task_state.stream_id)
+
+    async def _send_task_created_message(self, task_state: RemoteTaskState, message: str) -> None:
+        """发送任务创建提示。"""
+
+        # 任务创建提示默认留在原聊天流，群里其他人能看到 task_id，方便后续 status/cancel。
+        # 只有显式开启 private_progress_send_task_created 才私聊。
+        if task_state.private_progress and self.config.progress.private_progress_send_task_created:
+            if await self._try_send_private_task_text(task_state, message, log_prefix="Codex 私聊任务创建提示发送失败"):
+                return
+        await self.ctx.send.text(message, task_state.stream_id)
+
+    async def _try_send_private_task_text(self, task_state: RemoteTaskState, message: str, log_prefix: str) -> bool:
+        """尝试向触发用户私聊发送任务文本。"""
+
+        # 不通过 MaiBot stream_id 发私聊，因为临时私聊路由可能不稳定。
+        # 这里直接调用 NapCat HTTP API 的 send_private_msg。
+        user_id = str(task_state.private_progress_user_id or task_state.user_id or "").strip()
+        if not task_state.private_progress or not user_id or not self.config.napcat.enabled:
+            return False
+        try:
+            await self._napcat_client.call_action(
+                "send_private_msg",
+                {
+                    "user_id": user_id,
+                    "message": [{"type": "text", "data": {"text": message}}],
+                },
+            )
+            return True
+        except Exception as exc:
+            self.ctx.logger.warning("%s: %s", log_prefix, exc)
+            return False
 
     async def _queue_local_progress(self, task_state: RemoteTaskState, progress_text: str) -> None:
         """延后一条本机进度，避免把最终回答提前当进度发出。"""
@@ -2617,12 +2683,26 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
             for artifact in artifacts:
                 lines.append(self._format_artifact_line(artifact))
 
-        await self.ctx.send.text("\n".join(lines).strip(), task_state.stream_id)
+        # 最终结果默认回原聊天流。只有在 --dm 且配置允许时，才把最终摘要和产物一起私聊。
+        # 这样默认行为仍适合群协作，想要更私密时再显式开启。
+        final_message = "\n".join(lines).strip()
+        private_final = bool(task_state.private_progress and self.config.progress.private_progress_send_artifacts)
+        if private_final:
+            if not await self._try_send_private_task_text(
+                task_state,
+                final_message,
+                log_prefix="Codex 私聊最终结果发送失败",
+            ):
+                await self.ctx.send.text(final_message, task_state.stream_id)
+        else:
+            await self.ctx.send.text(final_message, task_state.stream_id)
 
         if self.config.napcat.enabled and artifacts:
-            await self._upload_artifacts_via_napcat(task_state, artifacts)
+            await self._upload_artifacts_via_napcat(task_state, artifacts, force_private=private_final)
 
-        if self.config.artifact.try_custom_file_message and artifacts:
+        # send.custom 是早期兼容路径，主要给非 NapCat 适配器预留。
+        # 如果最终结果配置成私聊，就不再额外走 send.custom，避免群里又出现一份文件提示。
+        if self.config.artifact.try_custom_file_message and artifacts and not private_final:
             await self._try_send_custom_artifacts(task_state.stream_id, artifacts)
 
     def _format_artifact_line(self, artifact: Dict[str, Any]) -> str:
@@ -2675,7 +2755,12 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
             except Exception as exc:
                 self.ctx.logger.warning("自定义文件消息发送失败: %s", exc)
 
-    async def _upload_artifacts_via_napcat(self, task_state: RemoteTaskState, artifacts: List[Dict[str, Any]]) -> None:
+    async def _upload_artifacts_via_napcat(
+        self,
+        task_state: RemoteTaskState,
+        artifacts: List[Dict[str, Any]],
+        force_private: bool = False,
+    ) -> None:
         """通过 NapCat HTTP API 直传产物文件。"""
 
         failures: List[str] = []
@@ -2683,7 +2768,7 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
         for artifact in artifacts:
             name = str(artifact.get("name") or artifact.get("filename") or "未命名产物").strip()
             try:
-                await self._napcat_client.upload_artifact(task_state, artifact)
+                await self._napcat_client.upload_artifact(task_state, artifact, force_private=force_private)
             except Exception as exc:
                 self.ctx.logger.warning("NapCat 文件直传失败: %s", exc)
                 failure_line = f"- {name}: {exc}"
@@ -2693,10 +2778,23 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
                     failures.append(failure_line)
 
         if failures:
-            await self.ctx.send.text(
-                "NapCat 文件直传失败：\n" + "\n".join(failures[:5]),
-                task_state.stream_id,
-            )
+            failure_message = "NapCat 文件直传失败：\n" + "\n".join(failures[:5])
+            if force_private:
+                # 产物私聊失败时，用户最重要的是拿到文件。
+                # 因此回退到原聊天流再发一次，同时清掉 url，避免本地绝对路径被当链接展示。
+                fallback_artifacts = []
+                for artifact in artifacts:
+                    fallback_artifact = dict(artifact)
+                    fallback_artifact["url"] = ""
+                    fallback_artifact["download_url"] = ""
+                    fallback_artifacts.append(fallback_artifact)
+                await self.ctx.send.text(
+                    f"{failure_message}\n已回退到当前聊天发送产物。",
+                    task_state.stream_id,
+                )
+                await self._upload_artifacts_via_napcat(task_state, fallback_artifacts, force_private=False)
+            else:
+                await self.ctx.send.text(failure_message, task_state.stream_id)
         elif uncertain_failures:
             self.ctx.logger.warning("NapCat 文件直传返回超时，可能已发送成功: %s", "; ".join(uncertain_failures[:5]))
 

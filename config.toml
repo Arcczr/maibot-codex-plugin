@@ -2,35 +2,51 @@
 
 [plugin]
 # 配置文件版本
-config_version = "0.3.0"
+config_version = "0.5.0"
 
 # 是否启用插件。触发权限由 permission 控制。
 enabled = true
 
-[server]
-# 远程 Ubuntu Agent 服务地址，例如 "https://agent.example.com" 或 "http://10.0.0.2:8080"
-base_url = ""
+[local_codex]
+# Codex CLI 可执行文件名或绝对路径。
+codex_binary = "codex"
 
-# 鉴权 token。插件会以 Authorization: Bearer <token> 形式发送。
-api_token = ""
+# 本地任务根目录。相对路径按插件目录解析。
+# 默认写入 remote_codex_agent/data/tasks。
+# 不建议使用默认目录以外的其他路径，可能存在安全和误删风险，除非你知道自己在做什么。
+work_root = "data/tasks"
 
-# 是否要求配置 api_token。生产环境建议保持 true。
-require_api_token = true
+# Codex CLI 的沙箱模式。推荐 workspace-write。
+sandbox = "workspace-write"
 
-# 创建任务接口路径
-create_path = "/v1/tasks"
+# Codex CLI 的审批策略。服务器无人值守时推荐 never。
+approval_policy = "never"
 
-# 查询任务状态接口路径模板，必须包含 {task_id}
-status_path_template = "/v1/tasks/{task_id}"
+# 可选模型名，留空则使用 Codex CLI 默认配置。
+model = ""
 
-# 取消任务接口路径模板，必须包含 {task_id}
-cancel_path_template = "/v1/tasks/{task_id}/cancel"
+# 是否传递 --search。取决于服务器上的 Codex CLI 版本是否支持。
+enable_search = false
 
-# HTTP 请求超时秒数
-request_timeout_seconds = 20.0
+# 额外传给 codex exec 的参数，例如 ["--profile", "server-agent"]。
+extra_args = []
 
-# 是否校验 HTTPS 证书。内网自签证书可临时关闭。
-verify_tls = true
+# 可选环境变量文件，供本机 Codex 子进程使用。
+env_file = "plugins/remote_codex_agent/.env.local"
+
+# 本地 Codex 任务运行超时，单位秒。
+process_timeout_seconds = 3600.0
+
+# 产物匹配规则，会在任务 workspace 下扫描。
+artifact_globs = [
+    "artifacts/*",
+    "*.docx",
+    "*.pdf",
+    "*.md",
+    "*.zip",
+    "*.xlsx",
+    "*.pptx",
+]
 
 [permission]
 # 是否允许所有用户触发。
@@ -67,90 +83,6 @@ trigger_chats = []
 # 群临时会话在部分 adapter 路由下可能把回复发回群聊，建议保持 true。
 reject_temporary_private_chat = true
 
-[task]
-# 帮助文本默认展示的主命令前缀。命令组件当前固定支持 /codex 和 /agent。
-command_prefix = "/codex"
-
-# 执行模式：local 表示直接调用本机 Codex CLI；remote 表示调用 server.base_url。
-execution_mode = "local"
-
-# 是否允许取消远程任务
-enable_cancel = true
-
-# 提交给远程服务的任务类型
-task_type = "codex_cli"
-
-# 单个聊天流同时运行的最大任务数
-max_running_tasks_per_stream = 1
-
-# 单个用户同时运行的最大任务数
-max_running_tasks_per_user = 1
-
-# 轮询远程任务状态间隔，单位秒
-poll_interval_seconds = 5.0
-
-# 单个任务最长跟踪时间，单位秒。远程任务可能继续运行，但插件会停止转发。
-max_watch_seconds = 3600.0
-
-# 普通 task 可通过 resume 继续的保留时间，单位小时。只清理插件记录，不删除产物目录。
-resumable_task_ttl_hours = 24.0
-
-# 把普通 task 转为 session 时是否要求二次确认。
-require_session_confirm = true
-
-# 启动时是否自动清理超过 resumable_task_ttl_hours 的普通 task 记录。
-auto_cleanup_task_records = true
-
-# 自动清理过期 task 记录时，是否同时删除对应 task workspace 和产物文件。
-# 建议确认产物不需要长期保留后再开启。
-auto_cleanup_task_workspaces = true
-
-# 是否启用后台定时清理。默认关闭；长时间不重启 MaiBot 时可开启。
-enable_periodic_cleanup = false
-
-# 后台定时清理间隔，单位分钟。
-# 每次会按上面的自动清理开关处理过期 task 记录/workspace，并按 input_file 的 TTL 清理输入材料。
-periodic_cleanup_interval_minutes = 60.0
-
-[local_codex]
-# Codex CLI 可执行文件名或绝对路径。
-codex_binary = "codex"
-
-# 本地任务根目录。相对路径按插件目录解析。
-# 默认写入 remote_codex_agent/data/tasks。
-# 不建议使用默认目录以外的其他路径，可能存在安全和误删风险，除非你知道自己在做什么。
-work_root = "data/tasks"
-
-# Codex CLI 的沙箱模式。推荐 workspace-write。
-sandbox = "workspace-write"
-
-# Codex CLI 的审批策略。服务器无人值守时推荐 never。
-approval_policy = "never"
-
-# 可选模型名，留空则使用 Codex CLI 默认配置。
-model = ""
-
-# 是否传递 --search。取决于服务器上的 Codex CLI 版本是否支持。
-enable_search = false
-
-# 额外传给 codex exec 的参数，例如 ["--profile", "server-agent"]。
-extra_args = []
-
-# 本地 Codex 任务运行超时，单位秒。
-process_timeout_seconds = 3600.0
-
-# 产物匹配规则，会在任务 workspace 下扫描。
-artifact_globs = [
-    "artifacts/*",
-    "*.docx",
-    "*.pdf",
-    "*.md",
-    "*.zip",
-    "*.xlsx",
-    "*.pptx",
-]
-env_file = "plugins/remote_codex_agent/.env.local"
-
 [progress]
 # 是否把运行进度转发到 QQ
 forward_progress = true
@@ -178,6 +110,14 @@ private_progress_trigger_args = ["--dm", "--private-progress"]
 
 # 私聊进度发送失败时，是否回退到原聊天流发送进度。
 private_progress_fallback_to_origin = true
+
+# 使用 --dm 时，是否把“任务已创建”的提示也私聊发送。
+# 一般建议保持 false，让群里能看到任务已创建和 task_id，方便协作和排查。
+private_progress_send_task_created = false
+
+# 使用 --dm 时，是否把最终结果和产物文件也私聊发送。
+# 开启后需要 napcat.enabled = true；私聊发送失败会回退到原聊天流。
+private_progress_send_artifacts = false
 
 [artifact]
 # 是否在完成时发送产物列表或下载链接
@@ -242,3 +182,73 @@ allow_url_download = true
 # 允许复制的本地文件根目录。空列表表示禁止复制服务器本地路径。
 # 日常使用建议通过 QQ 上传文件；确需读取本地目录时，由管理员显式配置允许根目录。
 allowed_local_roots = []
+
+[task]
+# 帮助文本默认展示的主命令前缀。命令组件当前固定支持 /codex 和 /agent。
+command_prefix = "/codex"
+
+# 执行模式：local 表示直接调用本机 Codex CLI；remote 表示调用 server.base_url。
+execution_mode = "local"
+
+# 是否允许取消远程任务
+enable_cancel = true
+
+# 提交给远程服务的任务类型
+task_type = "codex_cli"
+
+# 单个聊天流同时运行的最大任务数
+max_running_tasks_per_stream = 1
+
+# 单个用户同时运行的最大任务数
+max_running_tasks_per_user = 1
+
+# 轮询远程任务状态间隔，单位秒
+poll_interval_seconds = 5.0
+
+# 单个任务最长跟踪时间，单位秒。远程任务可能继续运行，但插件会停止转发。
+max_watch_seconds = 3600.0
+
+# 普通 task 可通过 resume 继续的保留时间，单位小时。只清理插件记录，不删除产物目录。
+resumable_task_ttl_hours = 24.0
+
+# 把普通 task 转为 session 时是否要求二次确认。
+require_session_confirm = true
+
+# 启动时是否自动清理超过 resumable_task_ttl_hours 的普通 task 记录。
+auto_cleanup_task_records = true
+
+# 自动清理过期 task 记录时，是否同时删除对应 task workspace 和产物文件。
+# 建议确认产物不需要长期保留后再开启。
+auto_cleanup_task_workspaces = true
+
+# 是否启用后台定时清理。默认关闭；长时间不重启 MaiBot 时可开启。
+enable_periodic_cleanup = false
+
+# 后台定时清理间隔，单位分钟。
+# 每次会按上面的自动清理开关处理过期 task 记录/workspace，并按 input_file 的 TTL 清理输入材料。
+periodic_cleanup_interval_minutes = 60.0
+
+[server]
+# 远程 Ubuntu Agent 服务地址，例如 "https://agent.example.com" 或 "http://10.0.0.2:8080"
+base_url = ""
+
+# 鉴权 token。插件会以 Authorization: Bearer <token> 形式发送。
+api_token = ""
+
+# 是否要求配置 api_token。生产环境建议保持 true。
+require_api_token = true
+
+# 创建任务接口路径
+create_path = "/v1/tasks"
+
+# 查询任务状态接口路径模板，必须包含 {task_id}
+status_path_template = "/v1/tasks/{task_id}"
+
+# 取消任务接口路径模板，必须包含 {task_id}
+cancel_path_template = "/v1/tasks/{task_id}/cancel"
+
+# HTTP 请求超时秒数
+request_timeout_seconds = 20.0
+
+# 是否校验 HTTPS 证书。内网自签证书可临时关闭。
+verify_tls = true
