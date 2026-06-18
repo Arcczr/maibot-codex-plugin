@@ -148,6 +148,9 @@ Details:
 - `local_codex.model` appends `-m <model>` when non-empty.
 - `local_codex.enable_search = true` appends `--search`.
 - `local_codex.extra_args` is appended before the prompt is sent.
+- `_build_local_codex_env` intentionally passes only a minimal environment plus
+  explicit `local_codex.pass_env_vars`. Do not restore full `os.environ`
+  inheritance; secrets exposed here may be read by Codex, skills, or MCP.
 - If the process environment cannot find `codex`, set `codex_binary` to an
   absolute path, for example `/root/.local/bin/codex` on Ubuntu/Linux or
   `C:\Users\YourName\AppData\Roaming\npm\codex.cmd` on Windows.

@@ -33,6 +33,12 @@ enable_search = false
 # 额外传给 codex exec 的参数，例如 ["--profile", "server-agent"]。
 extra_args = []
 
+# 额外传给 Codex 子进程的环境变量名。
+# 默认只传 PATH/HOME/CODEX_HOME/LANG 等最小运行环境，避免把 API key/token/secret 暴露给 Codex、skill 或 MCP。
+# 如果确实需要让 Codex 或 MCP 读取某个凭据，必须显式写在这里，并确认你接受泄露风险。
+# 示例：["OPENAI_API_KEY"]
+pass_env_vars = []
+
 # 本地 Codex 任务运行超时，单位秒。
 process_timeout_seconds = 3600.0
 
@@ -65,7 +71,7 @@ user_list_mode = "blacklist"
 trigger_users = []
 
 # 管理员用户。允许使用 danger-full-access 等高危配置。
-admin_users = [""]
+admin_users = []
 
 # 旧版聊天流白名单，保留兼容。推荐新配置使用 chat_list_mode + trigger_chats。
 allowed_groups = []

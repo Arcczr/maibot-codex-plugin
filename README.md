@@ -108,6 +108,7 @@ codex_binary = "codex"
 work_root = "data/tasks"
 sandbox = "workspace-write"
 approval_policy = "never"
+pass_env_vars = []
 ```
 
 如果只是自己测试，也可以临时：
@@ -409,6 +410,7 @@ enable_search = false
 sandbox = "workspace-write"
 approval_policy = "never"
 extra_args = []
+pass_env_vars = []
 ```
 
 说明：
@@ -416,6 +418,7 @@ extra_args = []
 - `model = ""` 表示使用本机 Codex CLI 默认模型配置。
 - `enable_search = true` 时，插件会给 Codex CLI 传递 `--search`。
 - `sandbox = "danger-full-access"` 属于高危配置，只建议管理员明确需要时使用。
+- `pass_env_vars` 默认空列表。插件只给 Codex 子进程传递最小运行环境；如果把 `OPENAI_API_KEY`、`*_TOKEN`、`*_SECRET` 等变量加入这里，Codex、skill 和 MCP 都可能读取这些值。
 
 ## 权限配置
 
@@ -629,4 +632,5 @@ codex -a never exec --json --color never -s workspace-write --skip-git-repo-chec
 - 控制任务超时、文件大小、进度长度和摘要长度。
 - 用户上传的文件可能包含隐私或敏感信息，只允许可信用户触发。
 - 不要把完整群聊历史默认交给 Codex。
+- 不要随意把 API key、token、secret 加入 `local_codex.pass_env_vars`；这些变量会暴露给 Codex、skill 和 MCP。
 - 如果使用 `remote` 模式，务必启用鉴权，并保持 `server.require_api_token = true`。

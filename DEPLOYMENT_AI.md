@@ -184,6 +184,7 @@ sandbox = "workspace-write"
 approval_policy = "never"
 model = ""
 enable_search = false
+pass_env_vars = []
 
 [input_file]
 enable_reply_file = true
@@ -207,6 +208,9 @@ Important choices:
 - `work_root` is relative to the plugin directory when not
   absolute. Do not change it away from the default directory unless the
   operator accepts the safety and accidental deletion risks.
+- Codex child processes receive only a minimal environment by default. Add
+  variables to `local_codex.pass_env_vars` only when the operator accepts that
+  Codex, skills, and MCP servers may read those values.
 
 ## Cleanup Configuration
 

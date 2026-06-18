@@ -35,6 +35,26 @@ PLUGIN_ID = "arcczr.remote-codex-agent"
 TERMINAL_STATUSES = {"succeeded", "failed", "cancelled"}
 ACTIVE_STATUSES = {"queued", "running"}
 SUPPORTED_COMMAND_PREFIXES = ("/codex", "/agent")
+DEFAULT_CODEX_ENV_ALLOWLIST = {
+    "PATH",
+    "HOME",
+    "USER",
+    "USERNAME",
+    "SHELL",
+    "COMSPEC",
+    "SYSTEMROOT",
+    "WINDIR",
+    "PATHEXT",
+    "TEMP",
+    "TMP",
+    "TMPDIR",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "TERM",
+    "COLORTERM",
+    "CODEX_HOME",
+}
 STATUS_ALIASES = {
     "complete": "succeeded",
     "completed": "succeeded",
@@ -135,6 +155,10 @@ class LocalCodexConfig(PluginConfigBase):
     model: str = Field(default="", description="可选模型名")
     enable_search: bool = Field(default=False, description="是否启用 Codex CLI --search")
     extra_args: List[str] = Field(default_factory=list, description="额外传给 codex exec 的参数")
+    pass_env_vars: List[str] = Field(
+        default_factory=list,
+        description="额外传给 Codex 子进程的环境变量名；这些变量可能被 Codex、skill 或 MCP 读取",
+    )
     process_timeout_seconds: float = Field(default=3600.0, description="本地 Codex 任务运行超时")
     artifact_globs: List[str] = Field(
         default_factory=lambda: ["artifacts/*", "*.docx", "*.pdf", "*.md", "*.zip", "*.xlsx", "*.pptx"],
@@ -2211,9 +2235,19 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
     def _build_local_codex_env(self) -> Dict[str, str]:
         """构造本机 Codex 子进程环境变量。"""
 
-        # 不再从插件配置读取 .env 文件，避免把额外密钥注入 Codex 子进程。
-        # Codex CLI 需要的 PATH/HOME/CODEX_HOME 应由 MaiBot 的启动环境提供。
-        return dict(os.environ)
+        # 不再继承完整环境，避免把 API key/token/secret 暴露给 Codex、
+        # skill 或 MCP。确实需要的变量必须由管理员显式加入 pass_env_vars。
+        allowed_names = {name.upper() for name in DEFAULT_CODEX_ENV_ALLOWLIST}
+        allowed_names.update(
+            str(name or "").strip().upper()
+            for name in self.config.local_codex.pass_env_vars
+            if str(name or "").strip()
+        )
+        env: Dict[str, str] = {}
+        for key, value in os.environ.items():
+            if key.upper() in allowed_names:
+                env[key] = value
+        return env
 
     async def _consume_local_stdout(
         self,
