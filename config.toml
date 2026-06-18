@@ -65,7 +65,7 @@ user_list_mode = "blacklist"
 trigger_users = []
 
 # 管理员用户。允许使用 danger-full-access 等高危配置。
-admin_users = []
+admin_users = [""]
 
 # 旧版聊天流白名单，保留兼容。推荐新配置使用 chat_list_mode + trigger_chats。
 allowed_groups = []

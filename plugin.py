@@ -576,7 +576,7 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
     @Command(
         "remote_codex_agent",
         description="触发远程 Ubuntu Codex CLI 任务",
-        pattern=r"^\s*(?:\[回复<[^>]+>：[\s\S]*?\]，说：\s*)?(?:@<[^>]+>\s*)*(?P<agent_command>/(?:codex|agent)(?:\s+[\s\S]*)?)$",
+        pattern=r"(?:^|\s)(?P<agent_command>/(?:codex|agent)(?:\s+[\s\S]*)?)\s*$",
     )
     async def handle_codex_command(
         self,
@@ -1057,7 +1057,13 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
         task_id = f"local_{time.strftime('%Y%m%d_%H%M%S')}_{uuid4().hex[:8]}"
         try:
             task_dir, workspace_dir, prompt_path, final_message_path = self._prepare_local_task_files(task_id, prompt)
-            input_files = await self._prepare_reply_input_files(command_message, stream_id, workspace_dir)
+            input_files = await self._prepare_reply_input_files(
+                command_message,
+                stream_id,
+                workspace_dir,
+                group_id=group_id,
+                user_id=user_id,
+            )
             prompt_path.write_text(self._build_local_codex_prompt(prompt, input_files), encoding="utf-8")
         except Exception as exc:
             message = f"创建本地 Codex 任务目录失败：{exc}"
@@ -1596,26 +1602,42 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
         group_id: str = "",
         user_id: str = "",
     ) -> List[InputFile]:
-        """从被回复的 QQ 文件消息中导入输入材料。"""
+        """从当前消息或被回复的 QQ 文件消息中导入输入材料。"""
 
         if not self.config.input_file.enable_reply_file:
             return []
 
-        reply_message_id = self._extract_reply_message_id(command_message)
-        if not reply_message_id:
-            return []
-
-        try:
-            reply_message = await self.ctx.message.get_by_id(reply_message_id, stream_id=stream_id)
-        except Exception as exc:
-            raise RuntimeError(f"无法读取被回复的消息：{exc}") from exc
-
-        # 优先用 MaiBot 自己的 message.get_by_id 读取被回复消息。
-        # 如果 SDK 返回的消息里没有文件段，再退回 NapCat get_msg 读取原始 QQ 消息。
-        file_segments = self._extract_file_segments(reply_message)
+        # 有些 adapter 会把“文件 + 文字命令”合成同一条 SessionMessage。
+        # 先取当前命令消息里的文件段，取不到时再按传统“回复文件消息”路径查。
+        file_segments = self._extract_file_segments(command_message)
+        source = "当前命令消息"
         if not file_segments:
-            napcat_message = await self._get_napcat_message(reply_message_id)
-            file_segments = self._extract_file_segments(napcat_message)
+            file_segments = self._extract_file_segments_from_text(command_message)
+            source = "当前命令文本"
+        reply_message_id = self._extract_reply_message_id(command_message)
+        if not file_segments:
+            if not reply_message_id:
+                return []
+
+            try:
+                reply_message = await self.ctx.message.get_by_id(reply_message_id, stream_id=stream_id)
+            except Exception as exc:
+                raise RuntimeError(f"无法读取被回复的消息：{exc}") from exc
+
+            # 优先用 MaiBot 自己的 message.get_by_id 读取被回复消息。
+            # 如果 SDK 返回的消息里没有文件段，再退回 NapCat get_msg 读取原始 QQ 消息。
+            file_segments = self._extract_file_segments(reply_message)
+            source = "被回复消息"
+            if not file_segments:
+                file_segments = self._extract_file_segments_from_text(reply_message)
+                source = "被回复消息文本"
+            if not file_segments:
+                napcat_message = await self._get_napcat_message(reply_message_id)
+                file_segments = self._extract_file_segments(napcat_message)
+                source = "NapCat 原始被回复消息"
+                if not file_segments:
+                    file_segments = self._extract_file_segments_from_text(napcat_message)
+                    source = "NapCat 原始被回复消息文本"
         if not file_segments:
             raise RuntimeError("被回复的消息里没有可用文件。请回复 QQ 文件消息后再发送 /codex。")
 
@@ -1627,6 +1649,7 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
         max_files = max(int(self.config.input_file.max_files_per_task), 1)
         for segment in file_segments[:max_files]:
             imported_files.append(await self._import_input_file_segment(segment, input_dir, group_id=group_id, user_id=user_id))
+        self.ctx.logger.info("已从%s导入 Codex 输入材料 %s 个", source, len(imported_files))
         return imported_files
 
     async def _get_napcat_message(self, message_id: str) -> Any:
@@ -1710,6 +1733,59 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
                     if key not in seen_keys:
                         seen_keys.add(key)
                         segments.append(segment)
+        return segments
+
+    def _extract_file_segments_from_text(self, message: Any) -> List[Dict[str, Any]]:
+        """从 adapter 渲染的 [文件] 文本中恢复文件下载信息。"""
+
+        text_values: List[str] = []
+        for value in self._walk_message_values(message):
+            if isinstance(value, str):
+                text_values.append(value)
+                continue
+            if isinstance(value, dict):
+                for key in ("text", "data", "processed_plain_text", "raw_message", "content"):
+                    raw_value = value.get(key)
+                    if isinstance(raw_value, str):
+                        text_values.append(raw_value)
+
+        segments: List[Dict[str, Any]] = []
+        seen_keys: set[str] = set()
+        for text in text_values:
+            for segment in self._parse_rendered_file_segments(text):
+                key = self._file_segment_key(segment)
+                if key and key not in seen_keys:
+                    seen_keys.add(key)
+                    segments.append(segment)
+        return segments
+
+    @staticmethod
+    def _parse_rendered_file_segments(text: str) -> List[Dict[str, Any]]:
+        """解析 NapCat adapter 入站 file 段渲染出的文本。"""
+
+        rendered_text = str(text or "")
+        if "[文件]" not in rendered_text or "链接:" not in rendered_text:
+            return []
+
+        pattern = re.compile(
+            r"\[文件\]\s*(?P<name>.*?)(?:，大小:\s*(?P<size>[^，\n\r]*))?，链接:\s*(?P<url>https?://\S+)",
+            flags=re.IGNORECASE,
+        )
+        segments: List[Dict[str, Any]] = []
+        for match in pattern.finditer(rendered_text):
+            url = match.group("url").strip()
+            if not url:
+                continue
+            name = (match.group("name") or "").strip(" ，")
+            # 正则只取到第一个空白前的 URL；这里只清掉末尾中文标点。
+            url = url.rstrip("，,。")
+            segment: Dict[str, Any] = {"url": url}
+            if name:
+                segment["name"] = name
+            size = (match.group("size") or "").strip()
+            if size:
+                segment["file_size"] = size
+            segments.append(segment)
         return segments
 
     @staticmethod
@@ -1979,7 +2055,7 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
                 values.extend(self._walk_message_values(child, depth + 1))
             return values
 
-        for attr in ("raw_message", "message", "message_chain", "segments", "data"):
+        for attr in ("raw_message", "message", "message_chain", "segments", "components", "content", "data"):
             if hasattr(value, attr):
                 try:
                     values.extend(self._walk_message_values(getattr(value, attr), depth + 1))
@@ -2704,7 +2780,12 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
 
         response = await self.ctx.api.call(api_name, **kwargs)
         if not isinstance(response, dict):
-            raise RuntimeError(f"{api_name} 返回不是 SDK 标准响应：{response!r}")
+            return response
+
+        # maibot_sdk 会把 Host 的 {"success": true, "result": ...} 自动解成 result。
+        # 单元测试或未来运行时也可能直接暴露 Host 包装结构，因此两种形态都兼容。
+        if "success" not in response and "error" not in response:
+            return response
         if not response.get("success"):
             message = response.get("error") or response.get("message") or response
             raise RuntimeError(f"{api_name} 调用失败：{message}")
