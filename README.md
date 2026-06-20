@@ -349,7 +349,7 @@ workspace/artifacts/slides.pptx
 
 ### 前置条件
 
-MaiBot 需要加载 NapCat Adapter，且当前插件 manifest 需要声明 `api.call` 能力。插件不再保存 NapCat 服务地址或 token。
+MaiBot 需要加载 NapCat Adapter。
 
 如果 MaiBot 和 NapCat 不在同一个文件系统里，产物路径必须是 NapCat 进程也能读取的路径，容器部署时通常需要共享卷。
 
@@ -475,7 +475,6 @@ data/tasks/<task_id>/
 data/tasks/_records/
 ```
 
-这些运行时目录不应该提交到 Git。
 
 ## 运行时清理策略
 
@@ -591,6 +590,10 @@ codex -a never exec --json --color never -s workspace-write --skip-git-repo-chec
 
 如果手动命令失败，优先处理 Codex CLI 安装、登录、网络、模型权限或本机配置问题。
 
+如果报错时提示：Missing environment variable:
+
+检查配置项`pass_env_vars`,填入该报错提示的环境变量名称。
+
 ### 宝塔启动能跑 MaiBot，但 Codex 不工作
 
 宝塔、systemd、SSH、VS Code 终端可能使用不同的环境变量和用户上下文。重点检查：
@@ -600,7 +603,8 @@ codex -a never exec --json --color never -s workspace-write --skip-git-repo-chec
 - `echo $HOME`
 - `echo $CODEX_HOME`
 - MaiBot 启动用户是否能读取 Codex 登录状态
-- 如启动环境找不到 `codex`，在 `local_codex.codex_binary` 填绝对路径：
+
+如启动环境找不到 codex（windows:[WinError 2] 系统找不到指定的文件。linux:[Errno 2] No such file or directory: codex）,在 `local_codex.codex_binary` 填绝对路径：
   Ubuntu/Linux 可用 `/root/.local/bin/codex` 或 `/usr/local/bin/codex`；
   Windows 可用 `C:\Users\你的用户名\AppData\Roaming\npm\codex.cmd`。
 
