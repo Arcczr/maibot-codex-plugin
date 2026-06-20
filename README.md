@@ -21,115 +21,111 @@ QQ 用户发送 /codex
 
 ## 快速开始
 
-### 1. 放置插件
+### 1. 从插件商店安装
 
-进入 MaiBot 插件目录：
-
-```bash
-cd ../MaiBot/plugins
-```
-
-把本仓库放到 `remote_codex_agent` 目录：
-
-```bash
-git clone https://github.com/Arcczr/maibot-codex-plugin.git remote_codex_agent
-```
-
-最终目录应类似：
+在 MaiBot 插件商店中安装本插件后，确认插件目录存在：
 
 ```text
-MaiBot/
-  plugins/
-    remote_codex_agent/
-      plugin.py
-      config.toml
-      _manifest.json
-      README.md
+MaiBot/plugins/remote_codex_agent/
 ```
-*如果你不想进行下面的部署,可以让AI阅读项目下的DEPLOYMENT_AI.md文档让他进行部署.如果遇到部署问题,可以附上DEVELOPMENT_AI.md文档。但建议你阅读完本说明*
 
-### 2. 安装插件依赖
+如果你是手动部署，目录第一层应直接包含 `plugin.py`、`config.toml`、`_manifest.json` 和 `README.md`。
 
-插件依赖 `httpx`。如果 MaiBot 使用 `uv` 启动，建议在 MaiBot 根目录执行：
+### 2. 确认依赖
+
+插件依赖 `httpx`。插件商店通常会按 manifest 安装依赖；如果启动日志提示找不到 `httpx`，在 MaiBot 根目录执行：
 
 ```bash
-cd ../MaiBot
 uv add httpx
 ```
 
-如果你的 MaiBot 项目不希望修改依赖文件，也可以按你当前环境的方式安装 `httpx`，只要启动 MaiBot 的 Python 环境能 import `httpx` 即可。
+或用你实际启动 MaiBot 的 Python 环境安装 `httpx`。
 
-### 3. 准备 Codex CLI(若已有则忽略)
+### 3. 准备 Codex CLI
 
-在运行 MaiBot 的同一个系统用户下安装并登录 Codex CLI。
+插件只负责调用本机 `codex` 命令，不负责安装、登录或配置 Codex CLI。请在运行 MaiBot 的同一个系统用户下确认：
 
-先确认 MaiBot 启动用户能执行：
+Linux / macOS：
 
 ```bash
+command -v codex
 codex --version
-```
-
-再做一次最小执行测试：
-
-```bash
 codex -a never exec --json --color never -s workspace-write --skip-git-repo-check -C /tmp "用中文回复：测试成功"
 ```
 
-如果这一步失败，先解决 Codex CLI 的安装、登录、网络或权限问题。插件只是调用本机 `codex` 命令，不负责登录 Codex 账号。
+Windows PowerShell：
 
-### 4. 修改配置
-
-编辑：
-
-```bash
-../MaiBot/plugins/remote_codex_agent/config.toml
+```powershell
+where codex
+codex --version
+codex -a never exec --json --color never -s workspace-write --skip-git-repo-check -C "$env:TEMP" "用中文回复：测试成功"
 ```
 
-最小可用配置：
+如果这些命令失败，先解决 Codex CLI 的安装、登录、网络、模型权限或本机配置问题。
+
+### 4. 修改插件配置
+
+可以在 MaiBot Web UI 的插件配置页修改，也可以编辑：
+
+```text
+MaiBot/plugins/remote_codex_agent/config.toml
+```
+
+最少需要检查这些项：
 
 ```toml
 [plugin]
 enabled = true
 
-[permission]
-# 一定要检查这一项；生产环境不建议长期开放给所有人。
-allow_all_users = false
-allowed_users = ["qq:你的QQ号"]
-allowed_groups = []
-
-[task]
-execution_mode = "local"
-
 [local_codex]
-# 也可以填绝对路径：
-# Ubuntu/Linux: "/root/.local/bin/codex" 或 "/usr/local/bin/codex"
-# Windows: "C:\\Users\\你的用户名\\AppData\\Roaming\\npm\\codex.cmd"
 codex_binary = "codex"
 work_root = "data/tasks"
 sandbox = "workspace-write"
 approval_policy = "never"
 pass_env_vars = []
+
+[permission]
+allow_all_users = false
+user_list_mode = "whitelist"
+trigger_users = ["qq:你的QQ号"]
+admin_users = ["qq:你的QQ号"]
+
+[task]
+execution_mode = "local"
 ```
 
-如果只是自己测试，也可以临时：
+如果只想先跑通测试，可以临时设置：
 
 ```toml
 [permission]
 allow_all_users = true
 ```
 
-生产环境不建议长期开放给所有人。
+生产环境不建议长期允许所有用户触发。
 
-### 5. 启动或重启 MaiBot
+如果 MaiBot 启动环境找不到 `codex`，把 `codex_binary` 改成绝对路径：
 
-在 MaiBot 根目录启动：
-
-```bash
-cd ../MaiBot
-uv run bot.py
+```toml
+[local_codex]
+# Ubuntu/Linux 示例
+codex_binary = "/root/.local/bin/codex"
 ```
 
-如果你使用宝塔、systemd、Docker 或其他方式启动 MaiBot，需要确保启动用户和你测试 `codex` 的用户一致，或者至少能访问同一个 Codex 登录状态和配置目录。
+```toml
+[local_codex]
+# Windows 示例
+codex_binary = "C:\\Users\\你的用户名\\AppData\\Roaming\\npm\\codex.cmd"
+```
+
+```toml
+[local_codex]
+# Windows 也可以用正斜杠
+codex_binary = "C:/Users/你的用户名/AppData/Roaming/npm/codex.cmd"
+```
+
+### 5. 重启 MaiBot
+
+改完配置后需要重启 MaiBot。无论使用 `uv run bot.py`、宝塔、systemd、Docker 还是 nohup，都要确保重启后的 MaiBot 使用的是你刚才测试过 `codex` 的同一个用户环境。
 
 ### 6. 在 QQ 中测试
 
@@ -140,6 +136,32 @@ uv run bot.py
 ```
 
 正常情况下，麦麦会先返回任务 ID，随后返回进度、最终摘要和产物信息。
+
+### 常见启动报错
+
+`[WinError 2] 系统找不到指定的文件。`
+
+Windows 找不到 `codex` 可执行文件。用 PowerShell 执行 `where codex`，然后把 `codex.cmd` 的完整路径写入 `local_codex.codex_binary`。
+
+`[Errno 2] No such file or directory: 'codex'`
+
+Linux 找不到 `codex`。用 `command -v codex` 查询完整路径，然后写入 `local_codex.codex_binary`。如果终端能找到但插件找不到，通常是 MaiBot 的启动环境和当前终端 PATH 不一样。
+
+`ModuleNotFoundError: No module named 'httpx'`
+
+插件依赖没装进 MaiBot 当前 Python 环境。在 MaiBot 根目录执行 `uv add httpx`，或按你的启动环境安装 `httpx`。
+
+`Codex 可以在终端运行，但插件任务失败`
+
+检查 MaiBot 启动用户是否和你测试 Codex 的用户一致。宝塔、systemd、Docker、nohup、VS Code 终端可能使用不同的 PATH、HOME、CODEX_HOME 和登录状态。
+
+`Codex CLI 读取不到 API key`
+
+插件默认只给 Codex 子进程传递最小环境变量。确实需要传递 API key 时，在 `[local_codex] pass_env_vars` 中显式加入变量名，例如 `["OPENAI_API_KEY"]`。这些变量会被 Codex、skill 和 MCP 读取，存在泄露风险，只给可信环境使用。
+
+`麦麦说没有 /codex 技能包`
+
+插件没有加载成功。检查插件是否启用、目录结构是否正确、MaiBot 日志里是否有 manifest 或依赖错误。
 
 ## 常用命令
 

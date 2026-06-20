@@ -2135,12 +2135,16 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
         stderr_log = task_dir / "stderr.log"
         task_state.last_status = "running"
 
-        command = self._build_local_codex_command(workspace_dir, final_message_path, resume_thread_id=resume_thread_id)
-        self.ctx.logger.info("启动本机 Codex 任务 %s: %s", task_state.task_id, " ".join(command))
-
         try:
             prompt_text = prompt_path.read_text(encoding="utf-8")
             env = self._build_local_codex_env()
+            command = self._build_local_codex_command(
+                workspace_dir,
+                final_message_path,
+                resume_thread_id=resume_thread_id,
+                env=env,
+            )
+            self.ctx.logger.info("启动本机 Codex 任务 %s: %s", task_state.task_id, " ".join(command))
             process = await asyncio.create_subprocess_exec(
                 *command,
                 stdin=asyncio.subprocess.PIPE,
@@ -2205,12 +2209,13 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
         workspace_dir: Path,
         final_message_path: Path,
         resume_thread_id: str = "",
+        env: Optional[Dict[str, str]] = None,
     ) -> List[str]:
         """构造本机 Codex CLI 命令。"""
 
         local_config = self.config.local_codex
         command = [
-            local_config.codex_binary.strip() or "codex",
+            self._resolve_local_codex_binary(local_config.codex_binary.strip() or "codex", env),
             "-a",
             local_config.approval_policy.strip() or "never",
             "-s",
@@ -2232,6 +2237,33 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
         command.extend(str(arg) for arg in local_config.extra_args if str(arg).strip())
         command.append("-")
         return command
+
+    @staticmethod
+    def _resolve_local_codex_binary(binary: str, env: Optional[Dict[str, str]] = None) -> str:
+        """解析 Codex CLI 可执行文件，兼容 Windows npm 生成的 codex.cmd。"""
+
+        raw_binary = str(binary or "").strip() or "codex"
+        if any(sep in raw_binary for sep in ("/", "\\")):
+            return raw_binary
+
+        search_path = (env or os.environ).get("PATH")
+        resolved = shutil.which(raw_binary, path=search_path)
+        if resolved:
+            return resolved
+
+        if os.name == "nt" and "." not in Path(raw_binary).name:
+            # Windows 上 npm 全局命令通常是 codex.cmd；部分启动环境不会自动按 PATHEXT 解析。
+            for suffix in (".cmd", ".exe", ".bat"):
+                resolved = shutil.which(f"{raw_binary}{suffix}", path=search_path)
+                if resolved:
+                    return resolved
+
+        raise FileNotFoundError(
+            "找不到 Codex CLI 可执行文件。请确认 MaiBot 启动环境能运行 codex，"
+            "或在 local_codex.codex_binary 填写绝对路径。Linux 可用 command -v codex 查询；"
+            "Windows 可用 where codex 查询，通常是 "
+            r"C:\Users\你的用户名\AppData\Roaming\npm\codex.cmd"
+        )
 
     def _build_local_codex_env(self) -> Dict[str, str]:
         """构造本机 Codex 子进程环境变量。"""
@@ -3535,11 +3567,17 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
     def _list_codex_mcp_servers(self) -> List[Dict[str, Any]]:
         """调用 codex mcp list --json 并规整输出。"""
 
-        command = [self.config.local_codex.codex_binary.strip() or "codex", "mcp", "list", "--json"]
+        env = self._build_local_codex_env()
+        command = [
+            self._resolve_local_codex_binary(self.config.local_codex.codex_binary.strip() or "codex", env),
+            "mcp",
+            "list",
+            "--json",
+        ]
         result = subprocess.run(
             command,
             cwd=str(Path.cwd()),
-            env=self._build_local_codex_env(),
+            env=env,
             text=True,
             capture_output=True,
             timeout=15,
