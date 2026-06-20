@@ -28,7 +28,7 @@ approval_policy = "never"
 model = ""
 
 # 是否传递 --search。取决于服务器上的 Codex CLI 版本是否支持。
-enable_search = false
+enable_search = true
 
 # 额外传给 codex exec 的参数，例如 ["--profile", "server-agent"]。
 extra_args = []
@@ -111,7 +111,10 @@ max_summary_chars = 1800
 enable_private_progress = true
 
 # 触发私聊进度的参数。示例：/codex --dm 生成一份报告
-private_progress_trigger_args = ["--dm", "--private-progress"]
+private_progress_trigger_args = [
+    "--dm",
+    "--private-progress",
+]
 
 # 私聊进度发送失败时，是否回退到原聊天流发送进度。
 private_progress_fallback_to_origin = true
