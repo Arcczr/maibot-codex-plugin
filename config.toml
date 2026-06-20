@@ -131,10 +131,16 @@ approval_policy = "never"
 model = ""
 
 # 是否传递 --search。取决于服务器上的 Codex CLI 版本是否支持。
-enable_search = false
+enable_search = true
 
 # 额外传给 codex exec 的参数，例如 ["--profile", "server-agent"]。
 extra_args = []
+
+# 额外传给 Codex 子进程的环境变量名。
+# 默认只传 PATH/HOME/CODEX_HOME/LANG 等最小运行环境，避免把 API key/token/secret 暴露给 Codex、skill 或 MCP。
+# 如果确实需要让 Codex 或 MCP 读取某个凭据，必须显式写在这里，并确认你接受泄露风险。
+# 示例：["OPENAI_API_KEY"]
+pass_env_vars = ["PRIVNODE_ENV_KEY"]
 
 # 本地 Codex 任务运行超时，单位秒。
 process_timeout_seconds = 3600.0
@@ -149,7 +155,41 @@ artifact_globs = [
     "*.xlsx",
     "*.pptx",
 ]
-env_file = "plugins/remote_codex_agent/.env.local"
+
+[permission]
+# 是否允许所有用户触发。
+# true 表示默认所有用户都能触发；如 user_list_mode = "blacklist"，trigger_users 里的用户仍会被禁止。
+# false 表示必须通过用户白名单；可使用旧 allowed_users，或使用 user_list_mode = "whitelist" + trigger_users。
+allow_all_users = true
+
+# 旧版用户白名单，保留兼容。推荐新配置使用 user_list_mode + trigger_users。
+allowed_users = []
+
+# 用户名单模式：whitelist 或 blacklist。
+# whitelist：只有 trigger_users 里的用户能触发。
+# blacklist：trigger_users 里的用户不能触发，其他用户按 allow_all_users 规则处理。
+user_list_mode = "blacklist"
+
+# 用户黑白名单。推荐写成 "qq:用户ID"；也兼容只写用户 ID。
+trigger_users = []
+
+# 管理员用户。允许使用 danger-full-access 等高危配置。
+admin_users = ["1404890996"]
+
+# 旧版聊天流白名单，保留兼容。推荐新配置使用 chat_list_mode + trigger_chats。
+allowed_groups = []
+
+# 聊天流名单模式：whitelist 或 blacklist。
+# 聊天流就是触发 /codex 的地方，可以是 QQ 群、QQ 私聊或 MaiBot 识别到的其他对话来源。
+# 如果你只在群里使用，把这里当成“群组黑白名单”理解即可。
+chat_list_mode = "blacklist"
+
+# 聊天流黑白名单。可写群号、"qq:群号" 或 stream_id；空列表表示不限制聊天流。
+trigger_chats = []
+
+# 是否拒绝 QQ 群临时私聊触发。
+# 群临时会话在部分 adapter 路由下可能把回复发回群聊，建议保持 true。
+reject_temporary_private_chat = true
 
 [progress]
 # 是否把运行进度转发到 QQ
@@ -174,7 +214,10 @@ max_summary_chars = 1800
 enable_private_progress = true
 
 # 触发私聊进度的参数。示例：/codex --dm 生成一份报告
-private_progress_trigger_args = ["--dm", "--private-progress"]
+private_progress_trigger_args = [
+    "--dm",
+    "--private-progress",
+]
 
 # 私聊进度发送失败时，是否回退到原聊天流发送进度。
 private_progress_fallback_to_origin = true
@@ -191,24 +234,10 @@ try_custom_file_message = false
 custom_file_message_type = "file"
 
 [napcat]
-# 是否启用 NapCat HTTP API 直接上传产物文件。
-# 需要在 NapCat WebUI 中为本 bot 新建 HTTP 服务器。
+# 是否启用 NapCat Adapter API 高级能力。
+# 开启后可通过 MaiBot SDK 调用 adapter.napcat.* 公开 API，用于产物直传、私聊进度和补全 QQ 文件信息。
+# 不需要在插件里配置 NapCat 服务地址或 token。
 enabled = true
-
-# NapCat HTTP Server 协议：http 或 https。
-scheme = "http"
-
-# NapCat HTTP Server 地址。和 MaiBot 同机部署通常填 127.0.0.1。
-host = "127.0.0.1"
-
-# NapCat HTTP Server 端口，例如在 NapCat WebUI 里新增 9998。
-port = 9998
-
-# NapCat HTTP Server token。若 NapCat 该端口未设置 token，留空。
-token = ""
-
-# 上传请求超时秒数。大文件可适当调高。
-request_timeout_seconds = 120.0
 
 # 调用 upload_group_file/upload_private_file 时是否执行真实上传。
 upload_file = true

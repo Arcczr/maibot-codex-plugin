@@ -235,6 +235,7 @@ class RemoteTaskState:
     sent_progress_ids: set[str] = field(default_factory=set)
     last_progress_sent_at: float = 0.0
     pending_local_progress_text: str = ""
+    pending_local_progress_flush_task: Optional[asyncio.Task[None]] = None
     watch_task: Optional[asyncio.Task[None]] = None
     process: Optional[asyncio.subprocess.Process] = None
     workspace_dir: str = ""
@@ -2427,24 +2428,34 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
 
         return _sanitize_path_text(text, self._path_redactions_for_task(task_state))
 
-    async def _send_local_progress(self, task_state: RemoteTaskState, progress_text: str) -> None:
+    async def _send_local_progress(
+        self,
+        task_state: RemoteTaskState,
+        progress_text: str,
+        *,
+        force: bool = False,
+    ) -> bool:
         """按节流规则发送本机任务进度。"""
 
         if not self.config.progress.forward_progress:
-            return
+            return True
         progress_id = f"local:{hash(progress_text)}"
         if progress_id in task_state.sent_progress_ids:
-            return
+            return True
 
         now = time.monotonic()
-        if now - task_state.last_progress_sent_at < max(float(self.config.progress.min_send_interval_seconds), 0.0):
-            return
+        if not force and now - task_state.last_progress_sent_at < max(
+            float(self.config.progress.min_send_interval_seconds),
+            0.0,
+        ):
+            return False
         task_state.sent_progress_ids.add(progress_id)
         task_state.last_progress_sent_at = now
         max_chars = max(int(self.config.progress.max_progress_item_chars), 20)
         progress_text = self._sanitize_task_output_text(task_state, progress_text)
         message = _format_progress_message(task_state.task_id, [progress_text], max_chars)
         await self._send_progress_text(task_state, message)
+        return True
 
     async def _send_progress_text(self, task_state: RemoteTaskState, message: str) -> None:
         """按任务设置发送进度消息。"""
@@ -2475,12 +2486,63 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
 
         pending_text = task_state.pending_local_progress_text
         if pending_text:
-            await self._send_local_progress(task_state, pending_text)
+            self._cancel_pending_local_progress_flush(task_state)
+            await self._send_local_progress(task_state, pending_text, force=True)
         task_state.pending_local_progress_text = progress_text
+        self._schedule_pending_local_progress_flush(task_state, progress_text)
+
+    def _schedule_pending_local_progress_flush(self, task_state: RemoteTaskState, progress_text: str) -> None:
+        """为挂起的本机进度安排一次延迟发送。"""
+
+        self._cancel_pending_local_progress_flush(task_state)
+        delay = max(float(self.config.progress.min_send_interval_seconds), 0.0)
+        task_state.pending_local_progress_flush_task = asyncio.create_task(
+            self._flush_pending_local_progress_after_delay(task_state, progress_text, delay),
+            name=f"local_codex_progress_flush:{task_state.task_id}",
+        )
+
+    def _cancel_pending_local_progress_flush(self, task_state: RemoteTaskState) -> None:
+        """取消尚未执行的挂起进度刷新任务。"""
+
+        flush_task = task_state.pending_local_progress_flush_task
+        if flush_task is not None and not flush_task.done():
+            flush_task.cancel()
+        task_state.pending_local_progress_flush_task = None
+
+    async def _flush_pending_local_progress_after_delay(
+        self,
+        task_state: RemoteTaskState,
+        expected_text: str,
+        delay: float,
+    ) -> None:
+        """延迟刷出挂起进度，避免长任务只在结束前才看到第一条进度。"""
+
+        try:
+            if delay > 0:
+                await asyncio.sleep(delay)
+            while task_state.pending_local_progress_text == expected_text:
+                min_interval = max(float(self.config.progress.min_send_interval_seconds), 0.0)
+                remaining = min_interval - (time.monotonic() - task_state.last_progress_sent_at)
+                if remaining > 0:
+                    await asyncio.sleep(remaining)
+                    continue
+                sent = await self._send_local_progress(task_state, expected_text)
+                if sent and task_state.pending_local_progress_text == expected_text:
+                    task_state.pending_local_progress_text = ""
+                return
+        except asyncio.CancelledError:
+            return
+        except Exception as exc:
+            self.ctx.logger.warning("本机 Codex 挂起进度发送失败: %s", exc)
+        finally:
+            current_task = asyncio.current_task()
+            if task_state.pending_local_progress_flush_task is current_task:
+                task_state.pending_local_progress_flush_task = None
 
     def _discard_pending_local_progress(self, task_state: RemoteTaskState) -> None:
         """丢弃最后一条本机进度；它通常就是 final 摘要。"""
 
+        self._cancel_pending_local_progress_flush(task_state)
         task_state.pending_local_progress_text = ""
 
     def _read_local_final_message(

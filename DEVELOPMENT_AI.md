@@ -170,6 +170,10 @@ Local stdout is JSONL. The plugin extracts completed `agent_message` items.
 Duplicate-answer mitigation:
 
 - `_queue_local_progress` queues one progress item behind.
+- `_schedule_pending_local_progress_flush` sends a pending item after the
+  progress interval if the task keeps running and no newer agent message
+  arrives. This prevents long web/search tasks from showing their first
+  progress only at completion time.
 - `_discard_pending_local_progress` drops the final queued item on completion,
   because it is usually the final answer.
 - `_read_local_final_message` reads the final answer from `final.md`.
