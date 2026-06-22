@@ -527,6 +527,7 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
 
         self._client.update_config(self.config)
         self._ensure_records_dirs()
+        await self._notify_detached_local_tasks()
         self._cleanup_expired_task_records()
         self._cleanup_expired_input_files()
         self._restart_periodic_cleanup_task()
@@ -652,6 +653,10 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
         if sub_command in {"cancel", "取消"}:
             await self._handle_cancel(stream_id=stream_id, task_id=sub_arg)
             return True, "已处理取消命令", True
+
+        if sub_command in {"recover", "恢复"}:
+            await self._handle_recover(stream_id=stream_id, task_id=sub_arg)
+            return True, "已处理恢复命令", True
 
         if sub_command in {"skills", "skill", "技能"}:
             await self._handle_skills(stream_id=stream_id)
@@ -1363,6 +1368,198 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
         record["history"] = history
         record["task_ids"] = [str(item.get("task_id") or "") for item in history if str(item.get("task_id") or "")]
         self._write_session_record(record)
+
+    async def _notify_detached_local_tasks(self) -> Dict[str, int]:
+        """插件启动时提示可能因重启而脱离跟踪的本机任务。"""
+
+        result = {"running": 0, "finished": 0, "skipped": 0}
+        for path in self._task_records_dir().glob("*.json"):
+            record = self._read_json_file(path)
+            if not record:
+                continue
+
+            task_id = str(record.get("task_id") or path.stem).strip()
+            if not task_id or task_id in self._tasks:
+                result["skipped"] += 1
+                continue
+
+            status = self._normalize_status(record.get("last_status"), default="unknown")
+            if status not in ACTIVE_STATUSES:
+                continue
+
+            workspace_dir = str(record.get("workspace_dir") or "").strip()
+            if not task_id.startswith("local_") and not workspace_dir:
+                continue
+
+            workspace_path = self._resolve_orphan_workspace_path(task_id, workspace_dir)
+            if workspace_path is None or not workspace_path.exists():
+                result["skipped"] += 1
+                continue
+
+            stream_id = str(record.get("stream_id") or "").strip()
+            if not stream_id:
+                result["skipped"] += 1
+                continue
+
+            if self._local_codex_process_exists(task_id, str(workspace_path)):
+                result["running"] += 1
+                await self.ctx.send.text(
+                    f"Codex 任务 {task_id} 在插件系统重启后仍可能运行中。\n"
+                    f"插件无法继续接管这次运行的实时输出，请稍等一段时间后使用：/codex recover {task_id}",
+                    stream_id,
+                )
+                continue
+
+            artifacts = self._collect_local_artifacts(workspace_path)
+            if artifacts:
+                result["finished"] += 1
+                await self.ctx.send.text(
+                    f"Codex 任务 {task_id} 可能已在插件系统重启期间完成，但没有正常回传。\n"
+                    f"请使用：/codex recover {task_id}\n"
+                    f"recover 会按“恢复结果”重新发送产物，并把任务状态补为 succeeded。",
+                    stream_id,
+                )
+            else:
+                result["skipped"] += 1
+        if result["running"] or result["finished"]:
+            self.ctx.logger.info("Codex 脱离跟踪任务检查完成: %s", result)
+        return result
+
+    async def _recover_local_task_by_id(self, task_id: str, reply_stream_id: str) -> None:
+        """按 task_id 手动恢复已有产物的本机任务。"""
+
+        normalized = str(task_id or "").strip()
+        if not normalized:
+            await self.ctx.send.text("用法：/codex recover <task_id>", reply_stream_id)
+            return
+
+        if normalized in self._tasks:
+            task_state = self._tasks[normalized]
+            if task_state.last_status in ACTIVE_STATUSES:
+                await self.ctx.send.text(f"任务 {normalized} 仍在当前进程跟踪中，不需要 recover。", reply_stream_id)
+                return
+
+        record = self._load_task_record(normalized)
+        if not record:
+            await self.ctx.send.text(f"本地没有找到任务记录：{normalized}", reply_stream_id)
+            return
+
+        workspace_dir = str(record.get("workspace_dir") or "").strip()
+        workspace_path = self._resolve_orphan_workspace_path(normalized, workspace_dir)
+        if workspace_path is None or not workspace_path.exists():
+            await self.ctx.send.text(f"任务 {normalized} 的 workspace 不存在，无法 recover。", reply_stream_id)
+            return
+
+        if self._local_codex_process_exists(normalized, str(workspace_path)):
+            await self.ctx.send.text(
+                f"任务 {normalized} 的 Codex 进程可能仍在运行。\n"
+                f"插件系统刚才可能进行了自动重启，当前无法接管实时输出。请稍等一段时间后再次执行：/codex recover {normalized}",
+                reply_stream_id,
+            )
+            return
+
+        artifacts = self._collect_local_artifacts(workspace_path)
+        if not artifacts:
+            await self.ctx.send.text(f"任务 {normalized} 没有发现可回传产物，未修改状态。", reply_stream_id)
+            return
+
+        final_message_path = self._resolve_stored_path(
+            str(record.get("final_message_path") or workspace_path.parent / "final.md")
+        )
+        stdout_log = workspace_path.parent / "stdout.jsonl"
+        stderr_log = workspace_path.parent / "stderr.log"
+        task_state = self._task_state_from_record(record, normalized, workspace_path, final_message_path)
+        task_state.last_status = "succeeded"
+        summary = self._read_local_final_message(final_message_path, stderr_log, stdout_log, returncode=0)
+        status = self._normalize_status(record.get("last_status"), default="unknown")
+        if status == "succeeded":
+            summary = "这是通过 /codex recover 手动重传的结果。"
+        elif not final_message_path.exists():
+            summary = "这是通过 /codex recover 恢复的结果：插件重启后重新扫描到了产物，但没有捕获到正常结束摘要。"
+        else:
+            summary = f"这是通过 /codex recover 恢复的结果。\n{summary}"
+
+        if status != "succeeded":
+            self._record_task_state(task_state, artifacts=artifacts)
+            if task_state.record_type == "session" and task_state.session_name:
+                self._update_session_from_task(task_state, artifacts=artifacts)
+
+        await self._send_final_result(task_state, {"status": "succeeded", "summary": summary, "artifacts": artifacts})
+
+    def _resolve_orphan_workspace_path(self, task_id: str, workspace_dir: str) -> Optional[Path]:
+        """从记录或默认目录解析孤儿任务 workspace。"""
+
+        if workspace_dir:
+            return self._resolve_stored_path(workspace_dir)
+        if task_id:
+            return self._task_dir_for_id(task_id) / "workspace"
+        return None
+
+    def _task_state_from_record(
+        self,
+        record: Dict[str, Any],
+        task_id: str,
+        workspace_path: Path,
+        final_message_path: Path,
+    ) -> RemoteTaskState:
+        """把持久记录恢复成可用于发送结果的任务状态。"""
+
+        input_files = []
+        for item in record.get("input_files") or []:
+            if isinstance(item, dict):
+                input_files.append(
+                    InputFile(
+                        name=str(item.get("name") or ""),
+                        path=str(item.get("path") or ""),
+                        size=int(item.get("size") or 0),
+                        source=str(item.get("source") or ""),
+                    )
+                )
+        return RemoteTaskState(
+            task_id=task_id,
+            stream_id=str(record.get("stream_id") or ""),
+            platform=str(record.get("platform") or ""),
+            user_id=str(record.get("user_id") or ""),
+            group_id=str(record.get("group_id") or ""),
+            prompt=str(record.get("prompt") or ""),
+            created_at=float(record.get("created_at") or time.monotonic()),
+            last_status=self._normalize_status(record.get("last_status"), default="running"),
+            workspace_dir=str(workspace_path),
+            final_message_path=str(final_message_path),
+            input_files=input_files,
+            codex_thread_id=str(record.get("codex_thread_id") or ""),
+            record_type=str(record.get("record_type") or "task"),
+            session_name=str(record.get("session_name") or ""),
+            parent_task_id=str(record.get("parent_task_id") or ""),
+        )
+
+    @staticmethod
+    def _local_codex_process_exists(task_id: str, workspace_dir: str) -> bool:
+        """在 Linux 上用 /proc 粗略判断旧 Codex 子进程是否仍在运行。"""
+
+        proc_root = Path("/proc")
+        if os.name != "posix" or not proc_root.exists():
+            return False
+
+        needles = [value for value in (task_id, workspace_dir) if value]
+        if not needles:
+            return False
+
+        for entry in proc_root.iterdir():
+            if not entry.name.isdigit():
+                continue
+            try:
+                cmdline = (entry / "cmdline").read_bytes().replace(b"\x00", b" ").decode(
+                    "utf-8",
+                    errors="ignore",
+                )
+            except OSError:
+                continue
+            if "codex" not in cmdline.lower():
+                continue
+            if any(needle in cmdline for needle in needles):
+                return True
+        return False
 
     def _cleanup_expired_task_records(self, force: bool = False) -> Dict[str, int]:
         """清理超过保留时间的普通 task 记录。"""
@@ -2942,6 +3139,17 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
         if normalized_task_id:
             task_state = self._tasks.get(normalized_task_id)
             if task_state is None:
+                record = self._load_task_record(normalized_task_id)
+                if record:
+                    artifacts = _coerce_artifacts(record.get("artifacts") or [])
+                    artifact_text = f"\n产物数量：{len(artifacts)}" if artifacts else ""
+                    await self.ctx.send.text(
+                        f"任务 {normalized_task_id}: {record.get('last_status', 'unknown')}\n"
+                        f"提示词：{_truncate_text(str(record.get('prompt') or ''), 300)}"
+                        f"{artifact_text}",
+                        stream_id,
+                    )
+                    return
                 await self.ctx.send.text(f"本地未跟踪任务：{normalized_task_id}", stream_id)
                 return
             await self.ctx.send.text(
@@ -2962,6 +3170,11 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
             lines.append(f"- {task_state.task_id}: {task_state.last_status} / {_truncate_text(task_state.prompt, 80)}")
 
         await self.ctx.send.text("\n".join(lines) if len(lines) > 1 else "当前聊天流没有远程 Codex 任务。", stream_id)
+
+    async def _handle_recover(self, stream_id: str, task_id: str) -> None:
+        """处理孤儿任务产物恢复命令。"""
+
+        await self._recover_local_task_by_id(task_id=task_id, reply_stream_id=stream_id)
 
     async def _handle_cancel(self, stream_id: str, task_id: str) -> None:
         """处理任务取消命令。"""
@@ -3812,6 +4025,7 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
             f"{escaped_prefix} status 查看当前聊天流任务\n"
             f"{escaped_prefix} status <task_id> 查看指定任务\n"
             f"{escaped_prefix} cancel <task_id> 取消指定任务\n"
+            f"{escaped_prefix} recover <task_id> 恢复插件重启后未正常回传的产物\n"
             f"{escaped_prefix} clean 管理员清理过期 task\n"
             f"{escaped_prefix} clean input 管理员清理过期输入材料\n"
             f"{escaped_prefix} clean task <task_id> 管理员删除指定 task 记录和文件\n"
