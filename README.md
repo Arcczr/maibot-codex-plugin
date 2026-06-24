@@ -402,14 +402,18 @@ max_file_size_mb = 100.0
 
 ## SnowLuma 适配
 
-SnowLuma 适配器 0.7.x 提供了一部分 `adapter.napcat.*` 兼容 API。本插件会在 `[snowluma] enabled = true` 时只使用 SnowLuma 暴露的这些兼容 API：
+SnowLuma 适配是独立路径。开启 `[snowluma]` 后，本插件只通过 MaiBot SDK 调用 SnowLuma 适配器公开的能力；不会把 NapCat 当作兜底，也不要求同时启用 `[napcat]`。
 
-- `/codex --dm` 阶段性进度私聊：调用 `adapter.napcat.message.send_private_msg`
-- 回复消息追溯：调用 `adapter.napcat.message.get_msg`
-- 回复文件作为输入：如果 SnowLuma 入站 file 段带有 `url`，插件会按 URL 下载
-- 产物文件回传：调用 `adapter.napcat.message.send_group_msg` / `send_private_msg` 发送 OneBot `file` 段
+SnowLuma 适配器 0.7.x 公开了一部分 `adapter.napcat.*` 兼容 API。这里的 API 名称带有 `napcat`，但调用对象仍然是 SnowLuma 适配器暴露给 MaiBot 插件系统的公开 API，不是直接连接 NapCat。
 
-配置示例：
+### 配置
+
+`[napcat].enabled` 和 `[snowluma].enabled` 必须二选一。SnowLuma 模式推荐配置：
+
+```toml
+[napcat]
+enabled = false
+```
 
 ```toml
 [snowluma]
@@ -418,9 +422,39 @@ send_artifacts_as_file_segments = true
 max_file_size_mb = 100.0
 ```
 
+如果只需要普通文本进度和结果，`send_artifacts_as_file_segments` 可以关闭；插件仍会发送产物列表。开启后，插件会尝试通过 SnowLuma 发送 OneBot `file` 段。
+
+### 已适配能力
+
+| 能力 | SnowLuma 实现方式 |
+| --- | --- |
+| `/codex` 创建任务 | 走 MaiBot 正常命令入口，依赖 SnowLuma 把 QQ 消息注入 MaiBot |
+| `/codex --dm` 私聊进度 | 调用 `adapter.napcat.message.send_private_msg` |
+| 任务创建、进度、最终文本回传 | 走 MaiBot `send.text`，由 SnowLuma 网关发回 QQ |
+| 回复消息追溯 | 调用 `adapter.napcat.message.get_msg` 获取被回复消息 |
+| 回复文件作为输入 | SnowLuma 入站 file 段或渲染文本里带 `url/path` 时，插件导入到 `workspace/input` |
+| 产物 file 段回传 | 调用 `adapter.napcat.message.send_group_msg` / `send_private_msg` 发送 OneBot `file` 段 |
+| 无 NapCat 兜底 | SnowLuma 模式下不会调用 NapCat 文件 API 或 NapCat 进程 |
+
+### 当前限制
+
+SnowLuma 目前无法独立补全“只有 `file_id`、没有 `url/path`”的普通文件消息。也就是说：
+
+- 如果入站文件消息已经带 `url`，插件可以下载并导入。
+- 如果入站文件消息只带 `file_id`，插件会拒绝导入并说明缺少 SnowLuma 文件补全能力。
+- 要补齐这项能力，需要 SnowLuma 提供 `file_id + group_id/user_id -> url/path` 的公开 API 文档，例如 `get_file`、`get_group_file_url`、`get_private_file_url` 或等价动作。
+
 如果 SnowLuma 或 QQ 端不支持 OneBot `file` 段，插件会报告 SnowLuma 文件段发送失败，并保留产物列表；不会改用 NapCat。
 
-SnowLuma 目前无法独立补全“只有 `file_id`、没有 `url/path`”的文件消息。本插件配置中有 `unsupported_file_id_note` 提醒这一限制。要补齐这项能力，需要 SnowLuma 提供 `file_id + group_id/user_id -> url/path` 的公开 API 文档。
+### 排查建议
+
+如果 SnowLuma 能看到消息但插件没有响应，优先检查：
+
+- SnowLuma 适配器是否已启用并连接成功，MaiBot 日志中应出现 `SnowLuma WebSocket 已连接`。
+- SnowLuma 适配器的群聊/私聊名单过滤是否拦截了当前会话。
+- 本插件 `[snowluma].enabled` 是否为 `true`，且 `[napcat].enabled` 是否为 `false`。
+- `/codex` 命令是否被权限配置拦截，例如 `allow_all_users`、`trigger_users`、`trigger_chats`。
+- 文件输入是否真的带有 `url/path`，只有 `file_id` 时当前 SnowLuma 路径无法独立下载。
 
 ## Skills、MCP 和 Codex 配置
 

@@ -2,7 +2,7 @@
 
 [plugin]
 # 配置文件版本
-config_version = "0.6.1"
+config_version = "1.0.0"
 
 # 是否启用插件。触发权限由 permission 控制。
 enabled = true
@@ -31,11 +31,6 @@ send_artifacts_as_file_segments = true
 
 # SnowLuma file 段单个产物最大大小，单位 MB。0 表示不限制。
 max_file_size_mb = 100.0
-
-# 只读提示：当前 SnowLuma Adapter 没有公开 file_id 文件下载/URL 补全 API。
-# 因此 SnowLuma 模式下，回复文件必须在消息段中自带 url/path；只有 file_id 时不会调用 NapCat 兜底。
-# 如需实现 file_id-only 文件导入，需要 SnowLuma 的 get_file/get_group_file_url/get_private_file_url 或等价动作文档。
-unsupported_file_id_note = "SnowLuma Adapter 当前未公开 file_id 文件下载/URL 补全 API；本插件不会调用 NapCat 兜底。回复文件必须由 SnowLuma 消息段提供 url/path，否则需要补充 get_file/get_group_file_url/get_private_file_url 或等价动作文档后才能实现。"
 
 [local_codex]
 # Codex CLI 可执行文件名或绝对路径。
