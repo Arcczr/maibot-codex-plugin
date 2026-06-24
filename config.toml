@@ -2,10 +2,40 @@
 
 [plugin]
 # 配置文件版本
-config_version = "0.5.0"
+config_version = "0.6.1"
 
 # 是否启用插件。触发权限由 permission 控制。
 enabled = true
+
+[napcat]
+# 是否使用 NapCat Adapter API 高级能力。
+# 与 [snowluma].enabled 二选一；如果两者同时开启，插件会视为配置冲突，不会把 NapCat 当作 SnowLuma 兜底。
+# 开启后可通过 MaiBot SDK 调用 adapter.napcat.* 公开 API，用于产物直传、私聊进度和补全 QQ 文件信息。
+enabled = false
+
+# 调用 upload_group_file/upload_private_file 时是否执行真实上传。
+upload_file = true
+
+# 单个产物最大上传大小，单位 MB。0 表示不限制。
+max_file_size_mb = 100.0
+
+[snowluma]
+# 是否使用 SnowLuma Adapter 高级能力。
+# 与 [napcat].enabled 二选一；开启 SnowLuma 后，插件只走 SnowLuma 暴露的兼容 API，不调用 NapCat 兜底。
+# SnowLuma 当前公开了 adapter.napcat.message.send_private_msg / send_group_msg / get_msg 等兼容 API。
+enabled = false
+
+# 通过 SnowLuma 兼容发送 API 发送 OneBot file 段回传产物。
+# 这是 SnowLuma 的独立产物发送路径；如果底层不支持 file 段，插件只报告失败，不改用 NapCat。
+send_artifacts_as_file_segments = true
+
+# SnowLuma file 段单个产物最大大小，单位 MB。0 表示不限制。
+max_file_size_mb = 100.0
+
+# 只读提示：当前 SnowLuma Adapter 没有公开 file_id 文件下载/URL 补全 API。
+# 因此 SnowLuma 模式下，回复文件必须在消息段中自带 url/path；只有 file_id 时不会调用 NapCat 兜底。
+# 如需实现 file_id-only 文件导入，需要 SnowLuma 的 get_file/get_group_file_url/get_private_file_url 或等价动作文档。
+unsupported_file_id_note = "SnowLuma Adapter 当前未公开 file_id 文件下载/URL 补全 API；本插件不会调用 NapCat 兜底。回复文件必须由 SnowLuma 消息段提供 url/path，否则需要补充 get_file/get_group_file_url/get_private_file_url 或等价动作文档后才能实现。"
 
 [local_codex]
 # Codex CLI 可执行文件名或绝对路径。
@@ -105,8 +135,8 @@ max_progress_item_chars = 300
 max_summary_chars = 1800
 
 # 是否允许用户在创建任务时添加参数，把阶段性进度私聊发送给触发用户。
-# 需要 napcat.enabled = true，且机器人能私聊该用户；失败时可回退当前聊天流。
-# QQ/NapCat 发送私聊通常要求触发用户先主动私聊机器人一次。
+# 需要 napcat.enabled = true 或 snowluma.enabled = true，且机器人能私聊该用户；失败时可回退当前聊天流。
+# QQ 发送私聊通常要求触发用户先主动私聊机器人一次。
 # 群临时会话不等同于好友私聊，可能发送失败。
 enable_private_progress = true
 
@@ -124,7 +154,8 @@ private_progress_fallback_to_origin = true
 private_progress_send_task_created = false
 
 # 使用 --dm 时，是否把最终结果和产物文件也私聊发送。
-# 开启后需要 napcat.enabled = true；私聊发送失败会回退到原聊天流。
+# 开启后需要 napcat.enabled = true 或 snowluma.enabled = true；私聊发送失败会回退到原聊天流。
+# 产物文件发送取决于当前启用的适配器：NapCat 走 upload_*_file，SnowLuma 走 OneBot file 段。
 private_progress_send_artifacts = false
 
 [artifact]
@@ -137,18 +168,6 @@ try_custom_file_message = false
 
 # 自定义文件消息类型。不同适配器可能不同，例如 "file"。
 custom_file_message_type = "file"
-
-[napcat]
-# 是否启用 NapCat Adapter API 高级能力。
-# 开启后可通过 MaiBot SDK 调用 adapter.napcat.* 公开 API，用于产物直传、私聊进度和补全 QQ 文件信息。
-# 不需要在插件里配置 NapCat 服务地址或 token。
-enabled = false
-
-# 调用 upload_group_file/upload_private_file 时是否执行真实上传。
-upload_file = true
-
-# 单个产物最大上传大小，单位 MB。0 表示不限制。
-max_file_size_mb = 100.0
 
 [input_file]
 # 是否允许用户回复 QQ 文件消息后，用 /codex 把该文件作为输入材料。

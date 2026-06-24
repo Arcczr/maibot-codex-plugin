@@ -74,7 +74,7 @@ class PluginSectionConfig(PluginConfigBase):
     __ui_icon__: ClassVar[str] = "bot"
     __ui_order__: ClassVar[int] = 0
 
-    config_version: str = Field(default="0.5.0", description="配置版本号")
+    config_version: str = Field(default="0.6.1", description="配置版本号")
     enabled: bool = Field(default=True, description="是否启用插件")
 
 
@@ -83,7 +83,7 @@ class ServerConfig(PluginConfigBase):
 
     __ui_label__: ClassVar[str] = "远程服务"
     __ui_icon__: ClassVar[str] = "server"
-    __ui_order__: ClassVar[int] = 1
+    __ui_order__: ClassVar[int] = 3
 
     base_url: str = Field(default="", description="远程 Ubuntu Agent 服务地址")
     api_token: str = Field(default="", description="远程服务鉴权 token")
@@ -100,7 +100,7 @@ class PermissionConfig(PluginConfigBase):
 
     __ui_label__: ClassVar[str] = "权限"
     __ui_icon__: ClassVar[str] = "shield"
-    __ui_order__: ClassVar[int] = 2
+    __ui_order__: ClassVar[int] = 4
 
     # allow_all_users 是用户维度的总开关。开启后默认所有用户能用；
     # 但 user_list_mode=blacklist 时，trigger_users 里的用户仍会被拦截。
@@ -123,7 +123,7 @@ class TaskConfig(PluginConfigBase):
 
     __ui_label__: ClassVar[str] = "任务"
     __ui_icon__: ClassVar[str] = "terminal"
-    __ui_order__: ClassVar[int] = 3
+    __ui_order__: ClassVar[int] = 5
 
     command_prefix: str = Field(default="/codex", description="帮助文本默认展示的主命令前缀")
     execution_mode: str = Field(default="local", description="执行模式：local 或 remote")
@@ -146,7 +146,7 @@ class LocalCodexConfig(PluginConfigBase):
 
     __ui_label__: ClassVar[str] = "本地 Codex"
     __ui_icon__: ClassVar[str] = "terminal"
-    __ui_order__: ClassVar[int] = 4
+    __ui_order__: ClassVar[int] = 6
 
     codex_binary: str = Field(default="codex", description="Codex CLI 可执行文件名或绝对路径")
     work_root: str = Field(default="data/tasks", description="本地任务根目录；相对路径按插件目录解析")
@@ -171,14 +171,14 @@ class ProgressConfig(PluginConfigBase):
 
     __ui_label__: ClassVar[str] = "进度"
     __ui_icon__: ClassVar[str] = "activity"
-    __ui_order__: ClassVar[int] = 5
+    __ui_order__: ClassVar[int] = 7
 
     forward_progress: bool = Field(default=True, description="是否把运行进度转发到 QQ")
     min_send_interval_seconds: float = Field(default=5.0, description="进度消息最小发送间隔")
     max_progress_items_per_message: int = Field(default=5, description="每次最多合并多少条进度")
     max_progress_item_chars: int = Field(default=300, description="单条进度最大字符数")
     max_summary_chars: int = Field(default=1800, description="最终摘要最大字符数")
-    # 私聊进度依赖 NapCat Adapter 公开 API 的 send_private_msg。
+    # 私聊进度依赖 QQ 适配器公开的 NapCat 兼容 send_private_msg API。
     # QQ 侧通常要求用户先主动私聊过机器人，否则可能发送失败。
     enable_private_progress: bool = Field(default=False, description="是否允许用户用参数请求私聊接收阶段性进度")
     private_progress_trigger_args: List[str] = Field(
@@ -195,7 +195,7 @@ class ArtifactConfig(PluginConfigBase):
 
     __ui_label__: ClassVar[str] = "产物"
     __ui_icon__: ClassVar[str] = "file-text"
-    __ui_order__: ClassVar[int] = 6
+    __ui_order__: ClassVar[int] = 8
 
     send_artifact_links: bool = Field(default=True, description="完成时是否发送产物列表或下载链接")
     try_custom_file_message: bool = Field(default=False, description="是否尝试用 send.custom 发送文件消息")
@@ -205,13 +205,36 @@ class ArtifactConfig(PluginConfigBase):
 class NapCatConfig(PluginConfigBase):
     """NapCat Adapter API 配置。"""
 
-    __ui_label__: ClassVar[str] = "NapCat 直传"
+    __ui_label__: ClassVar[str] = "NapCat"
     __ui_icon__: ClassVar[str] = "upload"
-    __ui_order__: ClassVar[int] = 7
+    __ui_order__: ClassVar[int] = 1
 
-    enabled: bool = Field(default=False, description="是否启用 NapCat Adapter API 上传产物和补全文件信息")
+    enabled: bool = Field(default=False, description="是否使用 NapCat Adapter API；与 SnowLuma 二选一，不会作为 SnowLuma 兜底")
     upload_file: bool = Field(default=True, description="调用 upload_*_file 时是否执行真实上传")
     max_file_size_mb: float = Field(default=100.0, description="单个产物最大上传大小，0 表示不限制")
+
+
+class SnowLumaConfig(PluginConfigBase):
+    """SnowLuma Adapter 兼容配置。"""
+
+    __ui_label__: ClassVar[str] = "SnowLuma"
+    __ui_icon__: ClassVar[str] = "snowflake"
+    __ui_order__: ClassVar[int] = 2
+
+    enabled: bool = Field(default=False, description="是否使用 SnowLuma Adapter；与 NapCat 二选一，不会调用 NapCat 兜底")
+    send_artifacts_as_file_segments: bool = Field(
+        default=True,
+        description="通过 SnowLuma 兼容发送 API 发送 OneBot file 段回传产物；失败时不改用 NapCat",
+    )
+    max_file_size_mb: float = Field(default=100.0, description="SnowLuma file 段单个产物最大大小，0 表示不限制")
+    unsupported_file_id_note: str = Field(
+        default=(
+            "SnowLuma Adapter 当前未公开 file_id 文件下载/URL 补全 API；"
+            "本插件不会调用 NapCat 兜底。回复文件必须由 SnowLuma 消息段提供 url/path，"
+            "否则需要补充 get_file/get_group_file_url/get_private_file_url 或等价动作文档后才能实现。"
+        ),
+        description="只读提示：SnowLuma 当前无法独立补全只有 file_id 的文件消息",
+    )
 
 
 class InputFileConfig(PluginConfigBase):
@@ -219,7 +242,7 @@ class InputFileConfig(PluginConfigBase):
 
     __ui_label__: ClassVar[str] = "输入文件"
     __ui_icon__: ClassVar[str] = "paperclip"
-    __ui_order__: ClassVar[int] = 8
+    __ui_order__: ClassVar[int] = 9
 
     enable_reply_file: bool = Field(default=True, description="是否允许回复 QQ 文件消息创建带材料的 Codex 任务")
     input_dir_name: str = Field(default="input", description="输入材料放入 workspace 下的目录名")
@@ -236,13 +259,14 @@ class RemoteCodexAgentConfig(PluginConfigBase):
     """远程 Codex Agent 插件配置。"""
 
     plugin: PluginSectionConfig = Field(default_factory=PluginSectionConfig, description="插件基础配置")
+    napcat: NapCatConfig = Field(default_factory=NapCatConfig, description="NapCat Adapter API 配置")
+    snowluma: SnowLumaConfig = Field(default_factory=SnowLumaConfig, description="SnowLuma Adapter 兼容配置")
     server: ServerConfig = Field(default_factory=ServerConfig, description="远程服务配置")
     permission: PermissionConfig = Field(default_factory=PermissionConfig, description="触发权限配置")
     task: TaskConfig = Field(default_factory=TaskConfig, description="任务配置")
     local_codex: LocalCodexConfig = Field(default_factory=LocalCodexConfig, description="本机 Codex CLI 配置")
     progress: ProgressConfig = Field(default_factory=ProgressConfig, description="进度转发配置")
     artifact: ArtifactConfig = Field(default_factory=ArtifactConfig, description="产物回传配置")
-    napcat: NapCatConfig = Field(default_factory=NapCatConfig, description="NapCat Adapter API 配置")
     input_file: InputFileConfig = Field(default_factory=InputFileConfig, description="输入文件配置")
 
 
@@ -624,9 +648,9 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
             return False, "无法获取当前聊天流 ID", True
 
         command_message = kwargs.get("message")
-        # 群临时私聊在当前 NapCat adapter 里会带 private 类型，但同时携带 group_id。
+        # 群临时私聊在部分 QQ adapter 里会带 private 类型，但同时携带 group_id。
         # 如果继续使用 ctx.send.text(stream_id)，回复可能被送回群聊。这里直接拒绝作为命令入口。
-        # 提示消息也尽量走 NapCat 私聊，失败就静默，只在日志里留痕，避免再次污染群聊。
+        # 提示消息也尽量走当前启用的 QQ 适配器私聊，失败就静默，只在日志里留痕，避免再次污染群聊。
         if self.config.permission.reject_temporary_private_chat and self._is_temporary_private_chat(command_message):
             message = "当前是 QQ 群临时会话，消息路由可能不稳定。请在群聊中使用 /codex，或先主动私聊机器人后再使用。"
             await self._try_send_private_notice(user_id, message)
@@ -801,7 +825,11 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
             group_info = getattr(message_info, "group_info", None)
         if not isinstance(additional_config, dict):
             return False
-        message_type = str(additional_config.get("napcat_message_type") or "").strip().lower()
+        message_type = str(
+            additional_config.get("napcat_message_type")
+            or additional_config.get("snowluma_message_type")
+            or ""
+        ).strip().lower()
         target_group_id = str(additional_config.get("platform_io_target_group_id") or "").strip()
         target_user_id = str(additional_config.get("platform_io_target_user_id") or "").strip()
         if isinstance(group_info, dict):
@@ -815,8 +843,9 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
         """尝试私聊发送提示，失败时静默拦截。"""
 
         normalized_user_id = str(user_id or "").strip()
-        if not normalized_user_id or not self.config.napcat.enabled:
-            self.ctx.logger.info("已拒绝 QQ 群临时私聊 Codex 指令，未发送提示：缺少 user_id 或 NapCat 未启用")
+        if not normalized_user_id or not self._qq_adapter_message_api_enabled():
+            reason = self._qq_adapter_config_error() or "缺少 user_id 或 QQ 兼容消息 API 未启用"
+            self.ctx.logger.info("已拒绝 QQ 群临时私聊 Codex 指令，未发送提示：%s", reason)
             return
         try:
             await self._call_napcat_action(
@@ -828,6 +857,30 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
             )
         except Exception as exc:
             self.ctx.logger.info("已拒绝 QQ 群临时私聊 Codex 指令，私聊提示发送失败: %s", exc)
+
+    def _qq_adapter_message_api_enabled(self) -> bool:
+        """是否启用了可用于私聊/追溯消息的 QQ 适配器兼容 API。"""
+
+        return self._active_qq_adapter() in {"napcat", "snowluma"}
+
+    def _active_qq_adapter(self) -> str:
+        """返回当前唯一启用的高级 QQ 适配器。"""
+
+        enabled_adapters = []
+        if self.config.napcat.enabled:
+            enabled_adapters.append("napcat")
+        if self.config.snowluma.enabled:
+            enabled_adapters.append("snowluma")
+        if len(enabled_adapters) == 1:
+            return enabled_adapters[0]
+        return ""
+
+    def _qq_adapter_config_error(self) -> str:
+        """返回 QQ 适配器高级能力配置错误。"""
+
+        if self.config.napcat.enabled and self.config.snowluma.enabled:
+            return "NapCat 和 SnowLuma 不能同时启用，请二选一；插件不会跨适配器兜底。"
+        return ""
 
     def _parse_private_progress_args(self, prompt: str) -> tuple[str, bool]:
         """识别并移除请求私聊进度的命令参数。"""
@@ -1847,19 +1900,19 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
                 raise RuntimeError(f"无法读取被回复的消息：{exc}") from exc
 
             # 优先用 MaiBot 自己的 message.get_by_id 读取被回复消息。
-            # 如果 SDK 返回的消息里没有文件段，再退回 NapCat get_msg 读取原始 QQ 消息。
+            # 如果 SDK 返回的消息里没有文件段，再退回当前 QQ 适配器的 get_msg 读取原始消息。
             file_segments = self._extract_file_segments(reply_message)
             source = "被回复消息"
             if not file_segments:
                 file_segments = self._extract_file_segments_from_text(reply_message)
                 source = "被回复消息文本"
             if not file_segments:
-                napcat_message = await self._get_napcat_message(reply_message_id)
-                file_segments = self._extract_file_segments(napcat_message)
-                source = "NapCat 原始被回复消息"
+                adapter_message = await self._get_qq_adapter_message(reply_message_id)
+                file_segments = self._extract_file_segments(adapter_message)
+                source = "QQ 适配器原始被回复消息"
                 if not file_segments:
-                    file_segments = self._extract_file_segments_from_text(napcat_message)
-                    source = "NapCat 原始被回复消息文本"
+                    file_segments = self._extract_file_segments_from_text(adapter_message)
+                    source = "QQ 适配器原始被回复消息文本"
         if not file_segments:
             raise RuntimeError("被回复的消息里没有可用文件。请回复 QQ 文件消息后再发送 /codex。")
 
@@ -1874,15 +1927,17 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
         self.ctx.logger.info("已从%s导入 Codex 输入材料 %s 个", source, len(imported_files))
         return imported_files
 
-    async def _get_napcat_message(self, message_id: str) -> Any:
-        """通过 NapCat Adapter API 获取原始 QQ 消息。"""
+    async def _get_qq_adapter_message(self, message_id: str) -> Any:
+        """通过 QQ 适配器的 NapCat 兼容 API 获取原始 QQ 消息。"""
 
         if not str(message_id or "").strip():
+            return None
+        if not self._qq_adapter_message_api_enabled():
             return None
         try:
             return await self._call_napcat_api("adapter.napcat.message.get_msg", message_id=message_id)
         except Exception as exc:
-            self.ctx.logger.warning("NapCat get_msg 获取被回复消息失败: %s", exc)
+            self.ctx.logger.warning("QQ 兼容 get_msg 获取被回复消息失败: %s", exc)
             return None
 
     def _extract_reply_message_id(self, message: Any) -> str:
@@ -1983,7 +2038,7 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
 
     @staticmethod
     def _parse_rendered_file_segments(text: str) -> List[Dict[str, Any]]:
-        """解析 NapCat adapter 入站 file 段渲染出的文本。"""
+        """解析 QQ adapter 入站 file 段渲染出的文本。"""
 
         rendered_text = str(text or "")
         if "[文件]" not in rendered_text or "链接:" not in rendered_text:
@@ -2032,6 +2087,12 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
         file_ref = self._select_input_file_ref(resolved)
         name = self._guess_input_filename(resolved, file_ref)
         if not file_ref:
+            if self._active_qq_adapter() == "snowluma" and self._file_segment_has_file_id(resolved):
+                raise RuntimeError(
+                    f"SnowLuma 文件 {name} 只有 file_id，缺少可下载地址或本地路径。"
+                    "当前 SnowLuma Adapter 未公开 file_id 文件下载/URL 补全 API；"
+                    "需要提供 get_file、get_group_file_url、get_private_file_url 或等价动作文档后才能实现。"
+                )
             raise RuntimeError(f"文件 {name} 缺少可下载地址或本地路径")
 
         target_path = self._dedupe_path(input_dir / self._safe_filename(name))
@@ -2057,7 +2118,7 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
         group_id: str = "",
         user_id: str = "",
     ) -> Dict[str, Any]:
-        """通过 NapCat 补全 file_id 对应的文件信息。"""
+        """通过当前 QQ 适配器补全 file_id 对应的文件信息。"""
 
         data = dict(segment)
         if self._select_input_file_ref(data):
@@ -2067,17 +2128,21 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
         if not file_id:
             return data
 
-        try:
-            response_data = await self._call_napcat_action("adapter.napcat.file.get_file", {"file_id": file_id})
-        except Exception as exc:
-            self.ctx.logger.warning("NapCat get_file 获取输入文件失败: %s", exc)
-        else:
-            if isinstance(response_data, dict):
-                merged = dict(data)
-                merged.update(response_data)
-                if self._select_input_file_ref(merged):
-                    return merged
-                data = merged
+        active_adapter = self._active_qq_adapter()
+        if active_adapter == "napcat":
+            try:
+                response_data = await self._call_napcat_action("adapter.napcat.file.get_file", {"file_id": file_id})
+            except Exception as exc:
+                self.ctx.logger.warning("NapCat get_file 获取输入文件失败: %s", exc)
+            else:
+                if isinstance(response_data, dict):
+                    merged = dict(data)
+                    merged.update(response_data)
+                    if self._select_input_file_ref(merged):
+                        return merged
+                    data = merged
+        elif active_adapter == "snowluma":
+            return data
 
         url_data = await self._resolve_input_file_url(data, file_id=file_id, group_id=group_id, user_id=user_id)
         if url_data:
@@ -2094,6 +2159,9 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
         user_id: str = "",
     ) -> Dict[str, Any]:
         """通过 NapCat 文件 URL action 补全下载地址。"""
+
+        if self._active_qq_adapter() != "napcat":
+            return {}
 
         busid = str(data.get("busid") or data.get("bus_id") or "").strip()
         candidates: List[tuple[str, Dict[str, Any]]] = []
@@ -2114,6 +2182,12 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
             if isinstance(response_data, dict):
                 return response_data
         return {}
+
+    @staticmethod
+    def _file_segment_has_file_id(data: Dict[str, Any]) -> bool:
+        """文件段是否只剩平台文件 ID 可用于补全。"""
+
+        return bool(str(data.get("file_id") or data.get("fileId") or data.get("id") or "").strip())
 
     @staticmethod
     def _select_input_file_ref(data: Dict[str, Any]) -> str:
@@ -2693,9 +2767,9 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
         """尝试向触发用户私聊发送任务文本。"""
 
         # 不通过 MaiBot stream_id 发私聊，因为临时私聊路由可能不稳定。
-        # 这里通过 MaiBot SDK 调用 NapCat Adapter 的公开 API。
+        # 这里通过 MaiBot SDK 调用 QQ 适配器公开的 NapCat 兼容 API。
         user_id = str(task_state.private_progress_user_id or task_state.user_id or "").strip()
-        if not task_state.private_progress or not user_id or not self.config.napcat.enabled:
+        if not task_state.private_progress or not user_id or not self._qq_adapter_message_api_enabled():
             return False
         try:
             await self._call_napcat_action(
@@ -2922,8 +2996,15 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
         else:
             await self.ctx.send.text(final_message, task_state.stream_id)
 
-        if self.config.napcat.enabled and artifacts:
+        active_adapter = self._active_qq_adapter()
+        if active_adapter == "napcat" and artifacts:
             await self._upload_artifacts_via_napcat(task_state, artifacts, force_private=private_final)
+        elif (
+            active_adapter == "snowluma"
+            and self.config.snowluma.send_artifacts_as_file_segments
+            and artifacts
+        ):
+            await self._send_artifacts_via_snowluma_file_segments(task_state, artifacts, force_private=private_final)
 
         # send.custom 是早期兼容路径，主要给非 NapCat 适配器预留。
         # 如果最终结果配置成私聊，就不再额外走 send.custom，避免群里又出现一份文件提示。
@@ -3023,6 +3104,72 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
         elif uncertain_failures:
             self.ctx.logger.warning("NapCat 文件直传返回超时，可能已发送成功: %s", "; ".join(uncertain_failures[:5]))
 
+    async def _send_artifacts_via_snowluma_file_segments(
+        self,
+        task_state: RemoteTaskState,
+        artifacts: List[Dict[str, Any]],
+        force_private: bool = False,
+    ) -> None:
+        """实验性通过 SnowLuma 兼容发送 API 发送 OneBot file 段。"""
+
+        failures: List[str] = []
+        for artifact in artifacts:
+            name = str(artifact.get("name") or artifact.get("filename") or "未命名产物").strip()
+            try:
+                await self._send_artifact_via_snowluma_file_segment(task_state, artifact, force_private=force_private)
+            except Exception as exc:
+                self.ctx.logger.warning("SnowLuma 文件段发送失败: %s", exc)
+                failures.append(f"- {name}: {exc}")
+
+        if failures:
+            await self.ctx.send.text(
+                "SnowLuma 文件段发送失败，已保留上方产物列表：\n" + "\n".join(failures[:5]),
+                task_state.stream_id,
+            )
+
+    async def _send_artifact_via_snowluma_file_segment(
+        self,
+        task_state: RemoteTaskState,
+        artifact: Dict[str, Any],
+        force_private: bool = False,
+    ) -> Dict[str, Any]:
+        """发送单个 SnowLuma file 段。"""
+
+        file_value = self._extract_artifact_file_value(artifact)
+        name = self._extract_artifact_name(artifact, file_value)
+        self._check_snowluma_file_segment_size(artifact, file_value)
+
+        file_ref = self._normalize_snowluma_file_reference(file_value)
+        message = [{"type": "file", "data": {"file": file_ref, "name": name}}]
+        group_id = str(task_state.group_id or "").strip()
+        user_id = str(task_state.user_id or "").strip()
+        if group_id and not force_private:
+            return await self._call_napcat_action(
+                "adapter.napcat.message.send_group_msg",
+                {
+                    "group_id": group_id,
+                    "message": message,
+                },
+            )
+        if user_id:
+            return await self._call_napcat_action(
+                "adapter.napcat.message.send_private_msg",
+                {
+                    "user_id": user_id,
+                    "message": message,
+                },
+            )
+        raise ValueError("无法获取当前聊天的 group_id 或 user_id，不能发送文件段")
+
+    @staticmethod
+    def _normalize_snowluma_file_reference(file_value: str) -> str:
+        """把本地路径转成 SnowLuma/OneBot 更容易识别的 file 引用。"""
+
+        normalized = str(file_value or "").strip()
+        if normalized.lower().startswith(("http://", "https://", "file://", "base64://")):
+            return normalized
+        return f"file://{normalized}"
+
     @staticmethod
     def _is_uncertain_napcat_upload_failure(exc: Exception) -> bool:
         """NapCat sendMsg 超时可能已经把文件发出，避免在群里误报失败。"""
@@ -3068,7 +3215,7 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
 
     @staticmethod
     def _extract_artifact_file_value(artifact: Dict[str, Any]) -> str:
-        """从产物信息中提取可交给 NapCat 的文件路径或 URL。"""
+        """从产物信息中提取可交给 QQ 适配器的文件路径或 URL。"""
 
         for key in ("path", "file", "url", "download_url"):
             value = str(artifact.get(key) or "").strip()
@@ -3100,6 +3247,21 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
         if isinstance(size, (int, float)) and size > max_file_size_mb * 1024 * 1024:
             raise ValueError(f"产物超过 napcat.max_file_size_mb 限制：{size:.0f} bytes")
 
+    def _check_snowluma_file_segment_size(self, artifact: Dict[str, Any], file_value: str) -> None:
+        """检查 SnowLuma file 段发送的产物大小限制。"""
+
+        max_file_size_mb = float(self.config.snowluma.max_file_size_mb)
+        if max_file_size_mb <= 0:
+            return
+
+        size = artifact.get("size") or artifact.get("size_bytes")
+        if not isinstance(size, (int, float)):
+            path = Path(file_value)
+            if path.exists() and path.is_file():
+                size = path.stat().st_size
+        if isinstance(size, (int, float)) and size > max_file_size_mb * 1024 * 1024:
+            raise ValueError(f"产物超过 snowluma.max_file_size_mb 限制：{size:.0f} bytes")
+
     async def _call_napcat_api(self, api_name: str, **kwargs: Any) -> Any:
         """通过 MaiBot SDK 调用 NapCat Adapter 公开 API，并拆出真实结果。"""
 
@@ -3125,7 +3287,10 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
 
         status = result.get("status")
         retcode = result.get("retcode")
-        if (status is not None and status != "ok") or (retcode is not None and retcode != 0):
+        ok_retcodes = {0}
+        if self._active_qq_adapter() == "snowluma" and api_name.startswith("adapter.napcat.message."):
+            ok_retcodes.add(1)
+        if (status is not None and status != "ok") or (retcode is not None and retcode not in ok_retcodes):
             message = result.get("message") or result.get("wording") or result
             raise RuntimeError(f"{api_name} 执行失败：{message}")
 
@@ -3334,17 +3499,22 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
         model = local_model or default_model or "Codex 默认模型"
         reasoning = str(user_config.get("model_reasoning_effort") or "未设置").strip()
         provider = str(user_config.get("model_provider") or "默认").strip()
+        adapter_config_error = self._qq_adapter_config_error()
+        active_adapter = self._active_qq_adapter() or ("配置冲突" if adapter_config_error else "未启用")
         lines = [
             "Codex 当前配置：",
             f"模型：{model}",
             f"推理强度：{reasoning}",
             f"模型提供方：{provider}",
+            f"QQ 高级适配器：{active_adapter}",
             f"执行模式：{self._get_execution_mode()}",
             f"沙箱：{self.config.local_codex.sandbox}",
             f"审批策略：{self.config.local_codex.approval_policy}",
             f"联网搜索：{'启用' if self.config.local_codex.enable_search else '停用'}",
             f"进度转发：{'启用' if self.config.progress.forward_progress else '停用'}",
-            f"NapCat 直传：{'启用' if self.config.napcat.enabled else '停用'}",
+            f"NapCat：{'启用' if self.config.napcat.enabled else '停用'}",
+            f"SnowLuma：{'启用' if self.config.snowluma.enabled else '停用'}",
+            f"SnowLuma 文件段回传：{'启用' if self.config.snowluma.send_artifacts_as_file_segments else '停用'}",
             f"启动清理 task 记录：{'启用' if self.config.task.auto_cleanup_task_records else '停用'}",
             f"自动清理 task 文件：{'启用' if self.config.task.auto_cleanup_task_workspaces else '停用'}",
             f"定时清理：{'启用' if self.config.task.enable_periodic_cleanup else '停用'}",
@@ -3358,6 +3528,8 @@ class RemoteCodexAgentPlugin(MaiBotPlugin):
             lines.append("说明：模型来自本机 Codex 用户配置。")
         else:
             lines.append("说明：模型未显式配置，由 Codex CLI 自行选择默认值。")
+        if adapter_config_error:
+            lines.append(f"适配器配置错误：{adapter_config_error}")
         await self.ctx.send.text("\n".join(lines), stream_id)
 
     async def _handle_list(self, stream_id: str, platform: str, user_id: str, arg: str = "") -> None:

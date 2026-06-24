@@ -5,7 +5,7 @@
 > **免责声明**
 > 本插件代码由 **GPT-5.5** 进行编写。作者不对因使用本插件或其生成内容所导致的任何直接或间接的问题、损失或纠纷承担任何责任。**请用户自行评估风险并谨慎使用**。
 
-这个插件用于让 MaiBot 在 QQ 聊天中接收 `/codex` 指令，并在 MaiBot 所在设备上启动 Codex CLI 执行任务。插件会把任务进度、最终摘要和生成的文件产物回传到当前聊天流。
+这个插件用于让 MaiBot 在 QQ 聊天中接收 `/codex` 指令，并在 MaiBot 所在设备上启动 Codex CLI 执行任务。插件会把任务进度、最终摘要和生成的文件产物回传到当前聊天流，并可对接 NapCat 或 SnowLuma 适配器的公开 API 做增强发送。
 
 默认推荐部署方式是 `local` 模式：
 
@@ -93,6 +93,16 @@ admin_users = ["qq:你的QQ号"]
 [task]
 execution_mode = "local"
 ```
+
+如果使用 SnowLuma 适配器，并希望 `/codex --dm` 私聊进度和回复消息追溯走 SnowLuma 的 NapCat 兼容 API，可额外开启：
+
+```toml
+[snowluma]
+enabled = true
+send_artifacts_as_file_segments = true
+```
+
+`[napcat].enabled` 和 `[snowluma].enabled` 必须二选一。插件不会在 SnowLuma 模式下调用 NapCat 作为兜底。
 
 如果只想先跑通测试，可以临时设置：
 
@@ -334,8 +344,9 @@ allowed_local_roots = []
 
 - 插件不会自动猜“最近上传的文件”，必须回复具体文件消息。
 - Word、PPT、Excel、PDF、Markdown、TXT、ZIP 等文件都可以作为材料传入，最终能否正确读取取决于 Codex 环境中可用的解析工具。
-- 如果 QQ 文件消息只有 `file_id`，需要启用 `napcat.enabled`，让插件通过 MaiBot SDK 调用 NapCat Adapter 的 `get_file` 等公开 API 补全路径或下载地址。
-- 如果 MaiBot 和 NapCat 不在同一个文件系统里，需要用共享卷或 URL 方式让 MaiBot 读到文件。
+- NapCat 模式下，如果 QQ 文件消息只有 `file_id`，插件会调用 NapCat Adapter 的 `get_file` / `get_group_file_url` / `get_private_file_url` 补全路径或下载地址。
+- SnowLuma 模式下，入站 file 段若已经带 `url` 或 `path`，插件可以直接导入；若只有 `file_id`，当前 SnowLuma Adapter 没有公开等价文件补全 API，插件不会调用 NapCat 兜底。要实现这一点，需要 SnowLuma 的 `get_file`、`get_group_file_url`、`get_private_file_url` 或等价动作文档。
+- 如果 MaiBot 和当前 QQ 适配器不在同一个文件系统里，需要用共享卷或 URL 方式让 MaiBot 读到文件。
 - 输入材料会放在 `workspace/input/`，可按 `input_file_ttl_hours` 自动清理；清理输入材料不会删除产物、日志或 task 记录。
 
 ## 产物生成和回传
@@ -363,11 +374,11 @@ workspace/artifacts/summary.md
 workspace/artifacts/slides.pptx
 ```
 
-只要文件被 `artifact_globs` 匹配到，插件就会在任务完成时把它列入产物。启用 NapCat 直传后，插件还会尝试把这些文件直接发回 QQ。
+只要文件被 `artifact_globs` 匹配到，插件就会在任务完成时把它列入产物。启用 NapCat 时，插件走 NapCat 文件上传 API；启用 SnowLuma 时，插件走 SnowLuma 兼容发送 API 的 OneBot `file` 段。两条路径互相独立，不会跨适配器兜底。
 
 ## NapCat 直传文件
 
-如果只使用默认产物列表，群里只会看到文件名和大小。要让 QQ 群直接收到文件，建议启用 NapCat Adapter API 直传。
+如果只使用默认产物列表，群里只会看到文件名和大小。要让 QQ 群直接收到文件，可启用 NapCat Adapter API 直传。
 
 ### 前置条件
 
@@ -388,6 +399,28 @@ max_file_size_mb = 100.0
 
 - 群聊：`upload_group_file`
 - 私聊：`upload_private_file`
+
+## SnowLuma 适配
+
+SnowLuma 适配器 0.7.x 提供了一部分 `adapter.napcat.*` 兼容 API。本插件会在 `[snowluma] enabled = true` 时只使用 SnowLuma 暴露的这些兼容 API：
+
+- `/codex --dm` 阶段性进度私聊：调用 `adapter.napcat.message.send_private_msg`
+- 回复消息追溯：调用 `adapter.napcat.message.get_msg`
+- 回复文件作为输入：如果 SnowLuma 入站 file 段带有 `url`，插件会按 URL 下载
+- 产物文件回传：调用 `adapter.napcat.message.send_group_msg` / `send_private_msg` 发送 OneBot `file` 段
+
+配置示例：
+
+```toml
+[snowluma]
+enabled = true
+send_artifacts_as_file_segments = true
+max_file_size_mb = 100.0
+```
+
+如果 SnowLuma 或 QQ 端不支持 OneBot `file` 段，插件会报告 SnowLuma 文件段发送失败，并保留产物列表；不会改用 NapCat。
+
+SnowLuma 目前无法独立补全“只有 `file_id`、没有 `url/path`”的文件消息。本插件配置中有 `unsupported_file_id_note` 提醒这一限制。要补齐这项能力，需要 SnowLuma 提供 `file_id + group_id/user_id -> url/path` 的公开 API 文档。
 
 ## Skills、MCP 和 Codex 配置
 
@@ -421,7 +454,7 @@ codex mcp list --json
 /codex config
 ```
 
-会显示插件当前使用的本机 Codex 配置，包括模型、沙箱、审批策略、联网搜索、进度转发和 NapCat 直传状态。
+会显示插件当前使用的本机 Codex 配置，包括模型、沙箱、审批策略、联网搜索、进度转发和当前启用的 QQ 高级适配器状态。
 
 相关配置：
 
@@ -640,14 +673,25 @@ codex -a never exec --json --color never -s workspace-write --skip-git-repo-chec
 - 产物文件路径是否是 NapCat 进程能读取的本机路径或共享卷路径。
 - 文件大小是否超过 `napcat.max_file_size_mb`。
 
+### SnowLuma 私聊进度或文件段失败
+
+检查：
+
+- MaiBot 是否加载并启用了 SnowLuma Adapter。
+- 本插件 `[snowluma] enabled` 是否为 `true`。
+- SnowLuma 是否已经连接成功，且能正常发送普通消息。
+- 私聊进度通常要求触发用户先主动私聊机器人一次。
+- 文件段回传失败时，可关闭 `snowluma.send_artifacts_as_file_segments`，使用默认产物列表；插件不会改用 NapCat 兜底。
+
 ### 回复文件没有被读取
 
 检查：
 
 - 是否是“回复文件消息”发送 `/codex`，不是单独发送 `/codex`。
 - `input_file.enable_reply_file = true`。
-- 如果文件消息只有 `file_id`，`napcat.enabled` 是否开启，NapCat Adapter 公开 API 是否可用。
-- MaiBot 是否有权限读取 NapCat 返回的本地文件路径。
+- NapCat 模式下，如果文件消息只有 `file_id`，检查 `napcat.enabled` 是否开启、NapCat Adapter 文件 API 是否可用。
+- SnowLuma 模式下，如果文件消息只有 `file_id`，当前缺少 SnowLuma 文件补全 API；需要补充 `get_file` / `get_group_file_url` / `get_private_file_url` 或等价动作文档。
+- MaiBot 是否有权限读取当前适配器返回的本地文件路径。
 - 容器部署时是否配置了共享卷。
 
 ## 安全建议
