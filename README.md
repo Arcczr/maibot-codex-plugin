@@ -58,7 +58,7 @@ MaiBot/plugins/remote_codex_agent/
   allow_all_users = true
   ```
 
-  生产环境务必限制为你的 QQ 号：
+  测试后务必限制为你的 QQ 号：
 
   ```toml
   allow_all_users = false
@@ -67,7 +67,7 @@ MaiBot/plugins/remote_codex_agent/
   admin_users = ["qq:你的QQ号"]
   ```
 
-- **（可选）选择高级适配器**：  
+- **选择适配器**：  
   若要支持文件上传或私聊进度，请参考后续“NapCat 直传文件”或“SnowLuma 适配”章节配置相应 `[napcat]` 或 `[snowluma]` 块。
 
 ### 3. 配置项概述
